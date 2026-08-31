@@ -1,0 +1,17 @@
+# Entorno virtual: se recrea con requirements.txt
+.venv/
+__pycache__/
+*.py[cod]
+
+# Datos de ejecucion. El Edge recrea la base al arrancar.
+*.db
+*.db-shm
+*.db-wal
+
+# Credenciales del broker y del cloud
+.env
+broker/passwd
+broker/data/
+
+.idea/
+.vscode/
