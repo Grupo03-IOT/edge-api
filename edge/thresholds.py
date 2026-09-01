@@ -37,8 +37,13 @@ def refresh(log=print):
     el estado completo, asi que fusionar solo abriria la puerta a conservar un
     umbral que alla se borro.
     """
+    headers = {}
+    if config.CLOUD_TOKEN:
+        headers["Authorization"] = "Bearer " + config.CLOUD_TOKEN
+
     try:
-        r = requests.get(config.THRESHOLDS_URL, timeout=config.CLOUD_TIMEOUT)
+        r = requests.get(config.THRESHOLDS_URL, headers=headers,
+                         timeout=config.CLOUD_TIMEOUT)
         r.raise_for_status()
         rooms = r.json()
     except Exception as ex:
