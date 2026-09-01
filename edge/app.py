@@ -137,5 +137,16 @@ if __name__ == "__main__":
         mqtt_ingest.start()
     else:
         print("MQTT     ->  desactivado")
-    app.run(host=config.HOST, port=config.PORT, threaded=True,
-            use_reloader=False)
+    # El servidor de Flask avisa el mismo de que no es para produccion: es de un
+    # solo proceso y no aguanta carga ni errores. waitress es WSGI de verdad y
+    # no necesita configuracion. Si no esta instalado se sigue, pero avisando:
+    # que arranque no significa que aguante.
+    try:
+        from waitress import serve
+        print("Servidor ->  waitress, {} hilos".format(config.SERVER_THREADS))
+        serve(app, host=config.HOST, port=config.PORT,
+              threads=config.SERVER_THREADS)
+    except ImportError:
+        print("Servidor ->  Flask de desarrollo (waitress no instalado)")
+        app.run(host=config.HOST, port=config.PORT, threaded=True,
+                use_reloader=False)

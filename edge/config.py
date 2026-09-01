@@ -12,6 +12,10 @@ CLOUD_TOKEN = os.getenv("CLOUD_TOKEN", "")
 CLOUD_TIMEOUT = float(os.getenv("CLOUD_TIMEOUT", "5"))
 UPLOAD_BATCH = int(os.getenv("UPLOAD_BATCH", "60"))   # cuantos minutos por POST
 
+# Hilos del servidor. Con 20 salas entra un lote cada medio segundo, asi que
+# ocho sobran; subirlo solo aumentaria la contencion sobre SQLite.
+SERVER_THREADS = int(os.getenv("SERVER_THREADS", "8"))
+
 AGG_INTERVAL_S = int(os.getenv("AGG_INTERVAL_S", "10"))
 RAW_RETENTION_DAYS = int(os.getenv("RAW_RETENTION_DAYS", "14"))
 
