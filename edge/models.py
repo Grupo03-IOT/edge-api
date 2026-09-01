@@ -15,7 +15,15 @@ from peewee import (
     DateTimeField, BooleanField, TextField, ForeignKeyField,
 )
 
-db = SqliteDatabase(None, pragmas={"journal_mode": "wal", "foreign_keys": 1})
+# busy_timeout: SQLite admite un solo escritor a la vez, y aqui hay tres hilos
+# que escriben --agregador, refresco de umbrales y la ingesta--. Sin esto, el
+# que encuentra el lock ocupado falla al instante con "database is locked"; con
+# esto espera hasta 5 s, que es mas de lo que tarda cualquier ciclo.
+db = SqliteDatabase(None, pragmas={
+    "journal_mode": "wal",
+    "busy_timeout": 30000,
+    "foreign_keys": 1,
+})
 
 
 class BaseModel(Model):
@@ -44,7 +52,7 @@ class RawBatch(BaseModel):
     seq = IntegerField()
     ts = DateTimeField(index=True)          # hora declarada por el dispositivo
     minute_key = CharField(index=True)      # 'YYYY-MM-DDTHH:MM' -> clave de agregacion
-    received_at = DateTimeField(default=datetime.datetime.utcnow)
+    received_at = DateTimeField(default=datetime.datetime.utcnow, index=True)
     clock_suspect = BooleanField(default=False)
 
     laeq_1s_json = TextField()              # lista de floats
@@ -141,4 +149,9 @@ def init_db(path):
     db.init(path)
     db.connect(reuse_if_open=True)
     db.create_tables(ALL_MODELS)
+    # create_tables no anade indices a una tabla que ya existe, y sin este la
+    # purga recorre la tabla entera cada vez.
+    db.execute_sql(
+        "CREATE INDEX IF NOT EXISTS rawbatch_received_at "
+        "ON rawbatch (received_at)")
     return db
