@@ -100,6 +100,7 @@ Todo por variables de entorno, con valores por defecto en `edge/config.py`. Las 
 | Variable | Por defecto | |
 |---|---|---|
 | `CLOUD_URL` | `http://127.0.0.1:8080/api/v1/readings` | a dónde sube |
+| `CLOUD_API_KEY` | vacío | la credencial que emite el cloud. Sin ella, 401 |
 | `EDGE_PORT` | `5000` | |
 | `MQTT_ENABLED` | `true` | ponlo en `false` si no hay broker |
 | `NOISE_LIMIT_DBA` | `65` | umbral local de aviso |

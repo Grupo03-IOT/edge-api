@@ -38,8 +38,8 @@ def refresh(log=print):
     umbral que alla se borro.
     """
     headers = {}
-    if config.CLOUD_TOKEN:
-        headers["Authorization"] = "Bearer " + config.CLOUD_TOKEN
+    if config.CLOUD_API_KEY:
+        headers["X-API-Key"] = config.CLOUD_API_KEY
 
     try:
         r = requests.get(config.THRESHOLDS_URL, headers=headers,
@@ -64,7 +64,9 @@ def refresh(log=print):
         if t.get("enabled", True) and t.get("warn_value") is not None
     ]
 
-    with db.atomic():
+    # connection_context como el resto: este hilo abre y cierra la suya en vez
+    # de dejarla colgando.
+    with db.connection_context(), db.atomic("IMMEDIATE"):
         RoomThreshold.delete().execute()
         if filas:
             RoomThreshold.insert_many(filas).execute()

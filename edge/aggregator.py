@@ -255,22 +255,24 @@ def upload_pending():
 
     payload = {"readings": [to_cloud_payload(a) for a in pending]}
     headers = {"Content-Type": "application/json"}
-    if config.CLOUD_TOKEN:
-        headers["Authorization"] = "Bearer " + config.CLOUD_TOKEN
+    if config.CLOUD_API_KEY:
+        headers["X-API-Key"] = config.CLOUD_API_KEY
 
     try:
         r = requests.post(config.CLOUD_URL, json=payload,
                           headers=headers, timeout=config.CLOUD_TIMEOUT)
         if 200 <= r.status_code < 300:
             ids = [a.id for a in pending]
-            MinuteAggregate.update(uploaded=True).where(
-                MinuteAggregate.id.in_(ids)).execute()
+            with db.atomic("IMMEDIATE"):
+                MinuteAggregate.update(uploaded=True).where(
+                    MinuteAggregate.id.in_(ids)).execute()
             return len(pending), 0
         raise RuntimeError("HTTP {}".format(r.status_code))
     except Exception:
-        MinuteAggregate.update(
-            upload_attempts=MinuteAggregate.upload_attempts + 1
-        ).where(MinuteAggregate.id.in_([a.id for a in pending])).execute()
+        with db.atomic("IMMEDIATE"):
+            MinuteAggregate.update(
+                upload_attempts=MinuteAggregate.upload_attempts + 1
+            ).where(MinuteAggregate.id.in_([a.id for a in pending])).execute()
         return 0, len(pending)
 
 
@@ -283,15 +285,34 @@ def purge_old_raw():
 # ----------------------------------------------------------------- loop ----
 
 def worker(stop_event, log=print):
+    last_purge = [time.monotonic()]
     while not stop_event.is_set():
         try:
             with db.connection_context():
-                made = aggregate_pending()
+                # IMMEDIATE y no la transaccion normal: una que empieza leyendo
+                # y luego escribe NO espera su turno --falla en el acto si otro
+                # escribio mientras tanto, por mucho busy_timeout que haya--.
+                # Pidiendo el lock de escritura desde el principio, si esta
+                # ocupado se espera en vez de reventar.
+                with db.atomic("IMMEDIATE"):
+                    made = aggregate_pending()
+
+                # La subida va FUERA de la transaccion: dentro tendria el lock
+                # tomado durante una llamada de red.
                 sent, queued = upload_pending()
                 if made or sent or queued:
                     log("[agg] +{} minutos | subidos {} | en cola {}".format(
                         made, sent, queued))
-                purge_old_raw()
+
+                # La purga es retencion de 14 dias, no trabajo de cada ciclo:
+                # borrar por fecha bloquea la escritura, y hacerlo seis veces
+                # por minuto dejaba fuera al resto de hilos.
+                if time.monotonic() - last_purge[0] > config.PURGE_INTERVAL_S:
+                    last_purge[0] = time.monotonic()
+                    with db.atomic("IMMEDIATE"):
+                        borrados = purge_old_raw()
+                    if borrados:
+                        log("[agg] purgados {} lotes crudos".format(borrados))
         except Exception as exc:                       # el hilo no debe morir
             log("[agg] error: {}".format(exc))
         stop_event.wait(config.AGG_INTERVAL_S)

@@ -8,7 +8,7 @@ PORT = int(os.getenv("EDGE_PORT", "5000"))
 # A donde sube el Edge los agregados por minuto.
 # Aqui apunta el Spring Boot del equipo. Si no responde, se encolan.
 CLOUD_URL = os.getenv("CLOUD_URL", "http://127.0.0.1:8080/api/v1/readings")
-CLOUD_TOKEN = os.getenv("CLOUD_TOKEN", "")
+CLOUD_API_KEY = os.getenv("CLOUD_API_KEY", "")
 CLOUD_TIMEOUT = float(os.getenv("CLOUD_TIMEOUT", "5"))
 UPLOAD_BATCH = int(os.getenv("UPLOAD_BATCH", "60"))   # cuantos minutos por POST
 
@@ -18,6 +18,7 @@ SERVER_THREADS = int(os.getenv("SERVER_THREADS", "8"))
 
 AGG_INTERVAL_S = int(os.getenv("AGG_INTERVAL_S", "10"))
 RAW_RETENTION_DAYS = int(os.getenv("RAW_RETENTION_DAYS", "14"))
+PURGE_INTERVAL_S = int(os.getenv("PURGE_INTERVAL_S", "3600"))
 
 # De donde bajan los umbrales configurados en el cloud. Se piden aparte de la
 # subida: un lote rechazado no debe dejar ademas al Edge sin configuracion.
