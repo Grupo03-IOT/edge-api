@@ -8,7 +8,7 @@ logica seria garantizar que las dos vias se comporten distinto con el tiempo.
 import datetime
 import json
 
-from models import Device, RawBatch
+from models import Device, RawBatch, db
 
 REQUIRED_FIELDS = ("device_id", "room_id", "seq", "ts",
                    "acoustic", "climate", "presence")
@@ -64,42 +64,47 @@ def store_batch(body):
     now = datetime.datetime.utcnow()
     ts, suspect = resolve_timestamp(body.get("ts"), now)
 
-    device, _ = Device.get_or_create(
-        device_id=body["device_id"],
-        defaults={"room_id": body["room_id"]})
+    # Todo el lote en una transaccion IMMEDIATE: el dispositivo escribe cada
+    # 10 s y es el escritor mas frecuente. Sin pedir el lock de escritura desde
+    # el principio, una escritura que sigue a una lectura falla en el acto
+    # cuando otro hilo escribio en medio.
+    with db.atomic("IMMEDIATE"):
+        device, _ = Device.get_or_create(
+            device_id=body["device_id"],
+            defaults={"room_id": body["room_id"]})
 
-    # deteccion de lotes perdidos por el numero de secuencia
-    seq = int(body["seq"])
-    if device.last_seq >= 0 and seq > device.last_seq + 1:
-        device.lost_batches += seq - device.last_seq - 1
+        # deteccion de lotes perdidos por el numero de secuencia
+        seq = int(body["seq"])
+        if device.last_seq >= 0 and seq > device.last_seq + 1:
+            device.lost_batches += seq - device.last_seq - 1
 
-    device.room_id = body["room_id"]
-    device.fw_version = body.get("fw_version")
-    device.last_seen = now
-    device.last_seq = seq
-    device.link_status = "online"
-    device.save()
+        device.room_id = body["room_id"]
+        device.fw_version = body.get("fw_version")
+        device.last_seen = now
+        device.last_seq = seq
+        device.link_status = "online"
+        device.save()
 
-    ac, cl, pr = body["acoustic"], body["climate"], body["presence"]
+        ac, cl, pr = body["acoustic"], body["climate"], body["presence"]
 
-    RawBatch.create(
-        device=device,
-        room_id=body["room_id"],
-        seq=seq,
-        ts=ts,
-        minute_key=minute_key_of(ts),
-        received_at=now,
-        clock_suspect=suspect,
-        laeq_1s_json=json.dumps(ac.get("laeq_1s", [])),
-        lmax=ac.get("lmax", 0.0),
-        lmin=ac.get("lmin", 0.0),
-        hist_json=json.dumps(ac.get("hist", [])),
-        temp_c=cl.get("temp_c"),
-        rh_pct=cl.get("rh_pct"),
-        presence_state=pr.get("state", "unknown"),
-        occupied_s=pr.get("occupied_s", 0.0),
-        transitions=pr.get("transitions", 0),
-    )
+        RawBatch.create(
+            device=device,
+            room_id=body["room_id"],
+            seq=seq,
+            ts=ts,
+            minute_key=minute_key_of(ts),
+            received_at=now,
+            clock_suspect=suspect,
+            laeq_1s_json=json.dumps(ac.get("laeq_1s", [])),
+            lmax=ac.get("lmax", 0.0),
+            lmin=ac.get("lmin", 0.0),
+            hist_json=json.dumps(ac.get("hist", [])),
+            temp_c=cl.get("temp_c"),
+            rh_pct=cl.get("rh_pct"),
+            presence_state=pr.get("state", "unknown"),
+            occupied_s=pr.get("occupied_s", 0.0),
+            transitions=pr.get("transitions", 0),
+        )
 
     return seq, suspect
 

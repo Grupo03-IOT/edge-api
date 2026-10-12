@@ -8,18 +8,29 @@ PORT = int(os.getenv("EDGE_PORT", "5000"))
 # A donde sube el Edge los agregados por minuto.
 # Aqui apunta el Spring Boot del equipo. Si no responde, se encolan.
 CLOUD_URL = os.getenv("CLOUD_URL", "http://127.0.0.1:8080/api/v1/readings")
-CLOUD_TOKEN = os.getenv("CLOUD_TOKEN", "")
+CLOUD_API_KEY = os.getenv("CLOUD_API_KEY", "")
 CLOUD_TIMEOUT = float(os.getenv("CLOUD_TIMEOUT", "5"))
 UPLOAD_BATCH = int(os.getenv("UPLOAD_BATCH", "60"))   # cuantos minutos por POST
 
+# Hilos del servidor. Con 20 salas entra un lote cada medio segundo, asi que
+# ocho sobran; subirlo solo aumentaria la contencion sobre SQLite.
+SERVER_THREADS = int(os.getenv("SERVER_THREADS", "8"))
+
 AGG_INTERVAL_S = int(os.getenv("AGG_INTERVAL_S", "10"))
 RAW_RETENTION_DAYS = int(os.getenv("RAW_RETENTION_DAYS", "14"))
+PURGE_INTERVAL_S = int(os.getenv("PURGE_INTERVAL_S", "3600"))
 
 # De donde bajan los umbrales configurados en el cloud. Se piden aparte de la
 # subida: un lote rechazado no debe dejar ademas al Edge sin configuracion.
 THRESHOLDS_URL = os.getenv(
     "THRESHOLDS_URL", "http://127.0.0.1:8080/api/v1/room-thresholds")
 THRESHOLDS_REFRESH_S = int(os.getenv("THRESHOLDS_REFRESH_S", "60"))
+
+HEARTBEAT_URL = os.getenv(
+    "HEARTBEAT_URL", "http://127.0.0.1:8080/api/v1/edges/heartbeat")
+HEARTBEAT_S = int(os.getenv("HEARTBEAT_S", "60"))
+EDGE_CODE = os.getenv("EDGE_CODE", "edge-1")
+EDGE_VERSION = "0.1.0"
 
 # Umbrales por defecto. Se aplican a la sala que todavia no tiene los suyos:
 # una sala recien descubierta nunca se queda sin vigilancia.

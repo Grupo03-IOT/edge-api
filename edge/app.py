@@ -17,6 +17,7 @@ import json
 from flask import Flask, jsonify, request
 
 import config
+import heartbeat
 import mqtt_ingest
 import thresholds
 from aggregator import start as start_worker, to_cloud_payload
@@ -131,11 +132,25 @@ if __name__ == "__main__":
     thresholds.start()
     print("Umbrales ->  {}  cada {}s".format(
         config.THRESHOLDS_URL, config.THRESHOLDS_REFRESH_S))
+    heartbeat.start()
+    print("Latido   ->  {}  cada {}s como {} en {}".format(
+        config.HEARTBEAT_URL, config.HEARTBEAT_S, config.EDGE_CODE, config.SITE_CODE))
     if config.MQTT_ENABLED:
         print("MQTT     ->  {}:{}  prefijo {}/{}".format(
             config.MQTT_HOST, config.MQTT_PORT, config.MQTT_PREFIX, config.SITE_CODE))
         mqtt_ingest.start()
     else:
         print("MQTT     ->  desactivado")
-    app.run(host=config.HOST, port=config.PORT, threaded=True,
-            use_reloader=False)
+    # El servidor de Flask avisa el mismo de que no es para produccion: es de un
+    # solo proceso y no aguanta carga ni errores. waitress es WSGI de verdad y
+    # no necesita configuracion. Si no esta instalado se sigue, pero avisando:
+    # que arranque no significa que aguante.
+    try:
+        from waitress import serve
+        print("Servidor ->  waitress, {} hilos".format(config.SERVER_THREADS))
+        serve(app, host=config.HOST, port=config.PORT,
+              threads=config.SERVER_THREADS)
+    except ImportError:
+        print("Servidor ->  Flask de desarrollo (waitress no instalado)")
+        app.run(host=config.HOST, port=config.PORT, threaded=True,
+                use_reloader=False)
