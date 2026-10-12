@@ -17,6 +17,7 @@ import json
 from flask import Flask, jsonify, request
 
 import config
+import heartbeat
 import mqtt_ingest
 import thresholds
 from aggregator import start as start_worker, to_cloud_payload
@@ -131,6 +132,9 @@ if __name__ == "__main__":
     thresholds.start()
     print("Umbrales ->  {}  cada {}s".format(
         config.THRESHOLDS_URL, config.THRESHOLDS_REFRESH_S))
+    heartbeat.start()
+    print("Latido   ->  {}  cada {}s como {} en {}".format(
+        config.HEARTBEAT_URL, config.HEARTBEAT_S, config.EDGE_CODE, config.SITE_CODE))
     if config.MQTT_ENABLED:
         print("MQTT     ->  {}:{}  prefijo {}/{}".format(
             config.MQTT_HOST, config.MQTT_PORT, config.MQTT_PREFIX, config.SITE_CODE))

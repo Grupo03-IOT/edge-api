@@ -26,6 +26,12 @@ THRESHOLDS_URL = os.getenv(
     "THRESHOLDS_URL", "http://127.0.0.1:8080/api/v1/room-thresholds")
 THRESHOLDS_REFRESH_S = int(os.getenv("THRESHOLDS_REFRESH_S", "60"))
 
+HEARTBEAT_URL = os.getenv(
+    "HEARTBEAT_URL", "http://127.0.0.1:8080/api/v1/edges/heartbeat")
+HEARTBEAT_S = int(os.getenv("HEARTBEAT_S", "60"))
+EDGE_CODE = os.getenv("EDGE_CODE", "edge-1")
+EDGE_VERSION = "0.1.0"
+
 # Umbrales por defecto. Se aplican a la sala que todavia no tiene los suyos:
 # una sala recien descubierta nunca se queda sin vigilancia.
 NOISE_LIMIT_DBA = float(os.getenv("NOISE_LIMIT_DBA", "65"))
