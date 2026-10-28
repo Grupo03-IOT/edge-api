@@ -22,6 +22,7 @@ import math
 import random
 import sys
 import time
+from zoneinfo import ZoneInfo
 
 try:
     import requests
@@ -211,6 +212,8 @@ def main():
                     help="factor de aceleracion del tiempo simulado")
     ap.add_argument("--start", default=None,
                     help="hora simulada de inicio, ISO. Por defecto: ahora")
+    ap.add_argument("--timezone", default="America/Lima",
+                    help="zona del local: decide el horario de ocupacion; ts sigue en UTC")
     ap.add_argument("--minutes", type=int, default=0,
                     help="minutos simulados a generar; 0 = sin fin")
     ap.add_argument("--seed", type=int, default=None)
@@ -226,6 +229,7 @@ def main():
 
     sim_t = (datetime.datetime.fromisoformat(args.start) if args.start
              else datetime.datetime.utcnow())
+    site_tz = ZoneInfo(args.timezone)
 
     destino = (args.edge_url if args.transport == "http"
                else "mqtt://{}:{}".format(args.mqtt_host, args.mqtt_port))
@@ -243,8 +247,9 @@ def main():
 
     try:
         while deadline is None or simulated < deadline:
+            local_t = sim_t.replace(tzinfo=datetime.timezone.utc).astimezone(site_tz)
             for room in rooms:
-                room.step_occupancy(sim_t, SECONDS_PER_BATCH)
+                room.step_occupancy(local_t, SECONDS_PER_BATCH)
                 room.step_climate(SECONDS_PER_BATCH)
                 batch = room.build_batch(sim_t)
 
