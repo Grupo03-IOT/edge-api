@@ -51,6 +51,9 @@ Simula `sala-01`, `sala-02` y `sala-03`. `--speed 400` es 400 veces más rápido
 real: **una hora simulada tarda unos nueve segundos**, y con 60 minutos ya hay datos
 suficientes para que la analítica del cloud —que exige 30 lecturas— devuelva números.
 
+La ocupación sigue el horario de oficina de `--timezone` (por defecto `America/Lima`); los
+`ts` que se envían siguen en UTC.
+
 Vive aquí y no en su propio repositorio porque hoy su única razón de ser es probar el Edge.
 Cuando exista el firmware en C++, ambos se irán al repositorio del dispositivo.
 
