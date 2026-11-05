@@ -7,8 +7,9 @@ logica seria garantizar que las dos vias se comporten distinto con el tiempo.
 """
 import datetime
 import json
+import math
 
-from models import Device, RawBatch, db
+from models import Device, ForecastEvent, RawBatch, db
 
 REQUIRED_FIELDS = ("device_id", "room_id", "seq", "ts",
                    "acoustic", "climate", "presence")
@@ -123,4 +124,69 @@ def set_link_status(device_code, status):
         return False
     device.link_status = status
     device.save()
+    return True
+
+
+def store_forecast(device_code, body, received_at=None):
+    """Validate and idempotently persist a device forecast for its minute.
+
+    The aliases keep the current ZenRoom firmware payload (`prob`, `temp_limit`)
+    usable while the normalized API contract uses explicit field names.
+    """
+    if not isinstance(body, dict):
+        raise InvalidBatch("el pronostico no es un objeto JSON")
+    device = Device.get_or_none(Device.device_id == device_code)
+    if device is None:
+        raise InvalidBatch("dispositivo desconocido", ["device_id"])
+    claimed_device = body.get("device_id", body.get("device"))
+    if claimed_device is not None and claimed_device != device_code:
+        raise InvalidBatch("el dispositivo no coincide con el topic", ["device_id"])
+
+    try:
+        probability = float(body.get("probability", body.get("prob")))
+        horizon = int(body.get("horizon_min", body.get("eta_min", 15)))
+        limit = float(body.get("temperature_limit_c", body.get("temp_limit")))
+    except (TypeError, ValueError):
+        raise InvalidBatch("campos numericos del pronostico invalidos",
+                           ["probability", "horizon_min", "temperature_limit_c"])
+    if not math.isfinite(probability) or not 0 <= probability <= 1:
+        raise InvalidBatch("probability debe estar entre 0 y 1", ["probability"])
+    if not 1 <= horizon <= 1440:
+        raise InvalidBatch("horizon_min debe estar entre 1 y 1440", ["horizon_min"])
+    if not math.isfinite(limit) or not -50 <= limit <= 100:
+        raise InvalidBatch("temperature_limit_c fuera de rango", ["temperature_limit_c"])
+
+    received_at = received_at or datetime.datetime.utcnow()
+    raw_generated = body.get("generated_at")
+    try:
+        if raw_generated is None:
+            generated_at = received_at
+        elif isinstance(raw_generated, (int, float)):
+            generated_at = datetime.datetime.utcfromtimestamp(raw_generated)
+        else:
+            parsed = datetime.datetime.fromisoformat(
+                str(raw_generated).replace("Z", "+00:00"))
+            generated_at = (parsed.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+                            if parsed.tzinfo else parsed)
+    except (ValueError, TypeError, OverflowError):
+        raise InvalidBatch("generated_at invalido", ["generated_at"])
+    if generated_at.year < MIN_PLAUSIBLE_YEAR or (generated_at - received_at).total_seconds() > MAX_FUTURE_S:
+        raise InvalidBatch("generated_at fuera de rango", ["generated_at"])
+
+    ForecastEvent.insert(
+        device=device, room_id=device.room_id,
+        minute_key=minute_key_of(generated_at), probability=probability,
+        horizon_min=horizon, temperature_limit_c=limit,
+        model_version=str(body.get("model_version", "zenroom-forecast-v1"))[:64],
+        generated_at=generated_at,
+    ).on_conflict(
+        conflict_target=[ForecastEvent.device, ForecastEvent.minute_key],
+        update={
+            ForecastEvent.probability: probability,
+            ForecastEvent.horizon_min: horizon,
+            ForecastEvent.temperature_limit_c: limit,
+            ForecastEvent.model_version: str(body.get("model_version", "zenroom-forecast-v1"))[:64],
+            ForecastEvent.generated_at: generated_at,
+        },
+    ).execute()
     return True

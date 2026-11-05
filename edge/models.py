@@ -102,6 +102,12 @@ class MinuteAggregate(BaseModel):
     batches = IntegerField(default=0)       # recibidos
     expected = IntegerField(default=6)      # 60 s / 10 s
 
+    forecast_probability = FloatField(null=True)
+    forecast_horizon_min = IntegerField(null=True)
+    forecast_temperature_limit_c = FloatField(null=True)
+    forecast_model_version = CharField(null=True)
+    forecast_generated_at = DateTimeField(null=True)
+
     # cola de subida al cloud: si no hay internet, esto se queda en False
     # y se reintenta. El local no se queda ciego.
     uploaded = BooleanField(default=False, index=True)
@@ -123,6 +129,21 @@ class Alert(BaseModel):
     uploaded = BooleanField(default=False, index=True)
 
 
+class ForecastEvent(BaseModel):
+    """Latest validated device forecast, retained per device and room minute."""
+    device = ForeignKeyField(Device, backref="forecasts")
+    room_id = CharField(index=True)
+    minute_key = CharField(index=True)
+    probability = FloatField()
+    horizon_min = IntegerField()
+    temperature_limit_c = FloatField()
+    model_version = CharField()
+    generated_at = DateTimeField(index=True)
+
+    class Meta:
+        indexes = ((('device', 'minute_key'), True),)
+
+
 class RoomThreshold(BaseModel):
     """
     Copia local de lo que el cloud configuro para esta sala.
@@ -142,13 +163,27 @@ class RoomThreshold(BaseModel):
         indexes = ((("room_id", "metric"), True),)
 
 
-ALL_MODELS = [Device, RawBatch, MinuteAggregate, Alert, RoomThreshold]
+ALL_MODELS = [Device, RawBatch, MinuteAggregate, ForecastEvent, Alert, RoomThreshold]
 
 
 def init_db(path):
     db.init(path)
     db.connect(reuse_if_open=True)
     db.create_tables(ALL_MODELS)
+    # Peewee's create_tables is non-migrating. Add nullable columns so an
+    # existing Edge database can adopt forecasts without losing telemetry.
+    columns = {row[1] for row in db.execute_sql(
+        "PRAGMA table_info(minuteaggregate)").fetchall()}
+    additions = {
+        "forecast_probability": "REAL",
+        "forecast_horizon_min": "INTEGER",
+        "forecast_temperature_limit_c": "REAL",
+        "forecast_model_version": "TEXT",
+        "forecast_generated_at": "DATETIME",
+    }
+    for name, sql_type in additions.items():
+        if name not in columns:
+            db.execute_sql("ALTER TABLE minuteaggregate ADD COLUMN {} {}".format(name, sql_type))
     # create_tables no anade indices a una tabla que ya existe, y sin este la
     # purga recorre la tabla entera cada vez.
     db.execute_sql(
