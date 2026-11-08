@@ -37,6 +37,29 @@ quedan en la cola hasta que responda.
 > El cloud **debe tener un local creado** antes de recibir nada, o rechaza la subida con
 > `MONITORING_NO_SITE_AVAILABLE`.
 
+## Conectar el ESP32 de la guia
+
+El firmware para DHT22, PIR, HC-SR04, potenciometro, buzzer y tres pulsadores esta
+en [`firmware/`](firmware/README.md). Respeta los GPIO de la guia y entrega los
+niveles del potenciometro por el contrato normal de ruido.
+
+En PowerShell, desde esta carpeta:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+$env:MQTT_ENABLED = 'false'
+$env:CLOUD_API_KEY = 'TU_API_KEY'
+$env:SITE_CODE = 'site-1'
+$env:EDGE_CODE = 'edge-1'
+.\.venv\Scripts\python.exe edge/app.py
+```
+
+Ejecutar `edge/app.py` como script tambien en IntelliJ, con la raiz del repositorio
+como directorio de trabajo. El inicio prepara SQLite y los hilos de agregacion,
+latido y umbrales. Las variables se leen del proceso; un `.env` no se carga solo.
+El procedimiento del primer administrador y la API key esta en `cloud-api/README.md`.
+
 ## Probarlo sin hardware
 
 `simulator/device_sim.py` finge ser el ESP32. **No es una maqueta**: replica el algoritmo que
@@ -55,7 +78,7 @@ La ocupación sigue el horario de oficina de `--timezone` (por defecto `America/
 `ts` que se envían siguen en UTC.
 
 Vive aquí y no en su propio repositorio porque hoy su única razón de ser es probar el Edge.
-Cuando exista el firmware en C++, ambos se irán al repositorio del dispositivo.
+La implementacion C++ para el montaje actual esta en `firmware/zenroom_esp32`.
 
 ## Endpoints
 
@@ -91,10 +114,33 @@ datos de un minuto posterior *para esa sala*. Cerrar por `utcnow()` parecía nat
 450 lotes ingresados y **0 minutos agregados**: un ESP32 que aún no ha sincronizado por NTP
 reporta 1970, y con reloj de pared sus minutos no cierran nunca.
 
-**La entrega al cloud es *at-least-once*, no *exactly-once*.** El Edge reintenta cuando no
+**La entrega al cloud es *at-least-once*.** El Edge reintenta cuando no
 confirma la subida, porque perder datos es peor que duplicarlos. En una corrida de 3 horas
 simuladas con 3 salas produjo 540 minutos y el cloud recibió 543. **Deduplicar es
-responsabilidad de quien recibe**, y el cloud lo hace por `(room_id, ts)`.
+responsabilidad de quien recibe**, y el cloud actualiza por `(room_id, ts)`.
+
+La entrada del Edge tambien deduplica: usar `boot_id` nuevo en cada arranque y
+`seq` creciente dentro de ese arranque. Un lote nuevo devuelve 201; su reintento
+exacto devuelve 200 con `status=duplicate`. Reutilizar la misma identidad con
+otro contenido devuelve 400. Los clientes anteriores sin `boot_id` se identifican
+por dispositivo, secuencia y fecha original. La identidad se conserva durante la
+retencion de lotes crudos (14 dias por defecto).
+
+Se validan objetos, tipos, valores finitos, rangos, diez niveles de un segundo y
+70 posiciones de histograma. Un reloj no sincronizado conserva el tratamiento
+`clock_suspect`; los reintentos mantienen esa identidad incluso si se usa la hora
+de recepcion. Los lotes tardios invalidan el agregado existente, que se recalcula
+y vuelve a la cola. Una confirmacion HTTP de una revision anterior no confirma
+la nueva revision. El sobre enviado al Cloud incluye `site_code=SITE_CODE`.
+
+La actualizacion de SQLite es aditiva y se realiza al iniciar. Conserva lecturas
+y duplicados historicos; no corrige ni elimina automaticamente datos anteriores.
+
+## Pruebas de la conexion
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
 
 ## Configuración
 

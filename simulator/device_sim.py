@@ -22,6 +22,7 @@ import math
 import random
 import sys
 import time
+import uuid
 from zoneinfo import ZoneInfo
 
 try:
@@ -68,6 +69,7 @@ class Room:
         self.room_id = room_id
         self.device_id = "esp32-" + room_id
         self.seq = 0
+        self.boot_id = str(uuid.uuid4())
         self.occupied = False
         self.session_left_s = 0
         # transiciones DENTRO de la ventana actual de 10 s, no acumuladas:
@@ -140,6 +142,7 @@ class Room:
         self.transitions = 0          # se reinicia al cerrar el lote
         return {
             "device_id": self.device_id,
+            "boot_id": self.boot_id,
             "room_id": self.room_id,
             "fw_version": "0.1.0-sim",
             "seq": self.seq,
