@@ -56,10 +56,11 @@ def ingest():
     if body is None:
         return jsonify(error="JSON invalido o ausente"), 400
     try:
-        seq, suspect = store_batch(body)
+        seq, suspect, duplicate = store_batch(body)
     except InvalidBatch as exc:
         return jsonify(error=exc.message, fields=exc.fields), 400
-    return jsonify(status="ok", seq=seq, clock_suspect=suspect), 201
+    return jsonify(status="duplicate" if duplicate else "ok", seq=seq,
+                   clock_suspect=suspect), 200 if duplicate else 201
 
 
 # ------------------------------------------------------------ consulta ----

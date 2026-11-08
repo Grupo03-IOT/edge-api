@@ -64,7 +64,7 @@ def aggregate_pending():
         exists = MinuteAggregate.get_or_none(
             (MinuteAggregate.room_id == row.room_id)
             & (MinuteAggregate.minute_key == row.minute_key))
-        if exists:
+        if exists and not exists.dirty:
             continue
         if aggregate_minute(row.room_id, row.minute_key):
             made += 1
@@ -101,7 +101,7 @@ def aggregate_minute(room_id, minute_key):
     expected_s = len(batches) * 10.0
     occupied_pct = 100.0 * occupied_s / expected_s if expected_s else 0.0
 
-    agg = MinuteAggregate.create(
+    values = dict(
         room_id=room_id,
         minute_key=minute_key,
         ts=datetime.datetime.strptime(minute_key, "%Y-%m-%dT%H:%M"),
@@ -121,7 +121,22 @@ def aggregate_minute(room_id, minute_key):
         batches=len(batches),
         expected=6,
     )
-    evaluate_rules(agg)
+    agg = MinuteAggregate.get_or_none(
+        (MinuteAggregate.room_id == room_id)
+        & (MinuteAggregate.minute_key == minute_key))
+    if agg is None:
+        agg = MinuteAggregate.create(**values)
+    else:
+        for name, value in values.items():
+            setattr(agg, name, value)
+        agg.revision += 1
+        agg.dirty = False
+        agg.uploaded = False
+        agg.save()
+    # Una correccion historica no debe abrir/cerrar alertas como si fuera actual.
+    latest = (MinuteAggregate.select().where(MinuteAggregate.room_id == room_id)
+              .order_by(MinuteAggregate.ts.desc()).first())
+    evaluate_rules(latest)
     return agg
 
 
@@ -142,10 +157,14 @@ def _rule_sustained_noise(agg):
                              config.NOISE_LIMIT_DBA, config.NOISE_LIMIT_MINUTES)
     recent = list(MinuteAggregate
                   .select()
-                  .where(MinuteAggregate.room_id == agg.room_id)
+            .where((MinuteAggregate.room_id == agg.room_id)
+                   & (MinuteAggregate.ts <= agg.ts))
                   .order_by(MinuteAggregate.ts.desc())
                   .limit(minutos))
-    over = (len(recent) >= minutos
+    consecutive = (len(recent) >= minutos and all(
+        (recent[i].ts - recent[i + 1].ts).total_seconds() == 60
+        for i in range(len(recent) - 1)))
+    over = (consecutive
             and all(m.laeq is not None and m.laeq > limite for m in recent))
     _toggle(agg, "sustained_noise", over,
             "Noise above {:.0f} dBA for {} min".format(limite, minutos),
@@ -247,13 +266,15 @@ def upload_pending():
     """
     pending = list(MinuteAggregate
                    .select()
-                   .where(MinuteAggregate.uploaded == False)  # noqa: E712
+                   .where((MinuteAggregate.uploaded == False)  # noqa: E712
+                          & (MinuteAggregate.dirty == False))  # noqa: E712
                    .order_by(MinuteAggregate.ts)
                    .limit(config.UPLOAD_BATCH))
     if not pending:
         return 0, 0
 
-    payload = {"readings": [to_cloud_payload(a) for a in pending]}
+    payload = {"site_code": config.SITE_CODE,
+               "readings": [to_cloud_payload(a) for a in pending]}
     headers = {"Content-Type": "application/json"}
     if config.CLOUD_API_KEY:
         headers["X-API-Key"] = config.CLOUD_API_KEY
@@ -262,10 +283,14 @@ def upload_pending():
         r = requests.post(config.CLOUD_URL, json=payload,
                           headers=headers, timeout=config.CLOUD_TIMEOUT)
         if 200 <= r.status_code < 300:
-            ids = [a.id for a in pending]
             with db.atomic("IMMEDIATE"):
-                MinuteAggregate.update(uploaded=True).where(
-                    MinuteAggregate.id.in_(ids)).execute()
+                for agg in pending:
+                    # Durante la llamada HTTP puede haber llegado otro lote.
+                    # Solo confirmar la revision que efectivamente se envio.
+                    MinuteAggregate.update(uploaded=True).where(
+                        (MinuteAggregate.id == agg.id)
+                        & (MinuteAggregate.revision == agg.revision)
+                        & (MinuteAggregate.dirty == False)).execute()  # noqa: E712
             return len(pending), 0
         raise RuntimeError("HTTP {}".format(r.status_code))
     except Exception:
