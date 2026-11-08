@@ -19,7 +19,7 @@ import config
 import thresholds
 from acoustics import leq, merge_hists, percentile_level, leq_from_hist
 from comfort import pmv_ppd, verdict, ASSUMPTIONS
-from models import Alert, Device, MinuteAggregate, RawBatch, db
+from models import Alert, Device, ForecastEvent, MinuteAggregate, RawBatch, db
 
 
 def minute_key_of(dt):
@@ -101,6 +101,13 @@ def aggregate_minute(room_id, minute_key):
     expected_s = len(batches) * 10.0
     occupied_pct = 100.0 * occupied_s / expected_s if expected_s else 0.0
 
+    forecast = (ForecastEvent
+                .select()
+                .where((ForecastEvent.room_id == room_id)
+                       & (ForecastEvent.minute_key == minute_key))
+                .order_by(ForecastEvent.generated_at.desc())
+                .first())
+
     agg = MinuteAggregate.create(
         room_id=room_id,
         minute_key=minute_key,
@@ -120,6 +127,11 @@ def aggregate_minute(room_id, minute_key):
         transitions=sum(b.transitions for b in batches),
         batches=len(batches),
         expected=6,
+        forecast_probability=forecast.probability if forecast else None,
+        forecast_horizon_min=forecast.horizon_min if forecast else None,
+        forecast_temperature_limit_c=forecast.temperature_limit_c if forecast else None,
+        forecast_model_version=forecast.model_version if forecast else None,
+        forecast_generated_at=forecast.generated_at if forecast else None,
     )
     evaluate_rules(agg)
     return agg
@@ -217,7 +229,7 @@ def _device_state(room_id):
 
 def to_cloud_payload(agg):
     """Contrato Edge -> Cloud. Esto es lo que debe aceptar el Spring Boot."""
-    return {
+    payload = {
         "room_id": agg.room_id,
         "device": _device_state(agg.room_id),
         "ts": agg.ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -237,6 +249,15 @@ def to_cloud_payload(agg):
         },
         "quality": {"batches": agg.batches, "expected": agg.expected},
     }
+    if agg.forecast_probability is not None:
+        payload["forecast"] = {
+            "probability": agg.forecast_probability,
+            "horizon_min": agg.forecast_horizon_min,
+            "temperature_limit_c": agg.forecast_temperature_limit_c,
+            "model_version": agg.forecast_model_version,
+            "generated_at": agg.forecast_generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    return payload
 
 
 def upload_pending():
