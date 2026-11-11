@@ -21,7 +21,7 @@ import paho.mqtt.client as mqtt
 from peewee import DatabaseError
 
 import config
-from ingest import InvalidBatch, set_link_status, store_batch
+from ingest import InvalidBatch, set_link_status, store_batch, store_forecast
 from models import db
 
 
@@ -31,6 +31,10 @@ def _topic(*parts):
 
 READINGS_TOPIC = _topic("room", "+", "readings")
 STATUS_TOPIC = _topic("device", "+", "status")
+FORECAST_TOPIC = _topic("device", "+", "forecast")
+# Compatible with the current class/Wokwi demo while firmware adopts the
+# canonical comfort/<site>/device/<device>/forecast topic.
+LEGACY_FORECAST_TOPIC = "upc/iot/+/+/forecast"
 
 
 def _on_connect(client, userdata, flags, reason_code, properties=None):
@@ -41,8 +45,10 @@ def _on_connect(client, userdata, flags, reason_code, properties=None):
     # QoS 1: al menos una vez. Es lo que ya hacia el POST con reintentos, pero
     # resuelto por el protocolo. QoS 2 evitaria duplicados a cambio de que el
     # ESP32 guarde estado por mensaje, y la deduplicacion ya esta aguas abajo.
-    client.subscribe([(READINGS_TOPIC, 1), (STATUS_TOPIC, 1)])
-    log("[mqtt] suscrito a {} y {}".format(READINGS_TOPIC, STATUS_TOPIC))
+    client.subscribe([(READINGS_TOPIC, 1), (STATUS_TOPIC, 1),
+                      (FORECAST_TOPIC, 1), (LEGACY_FORECAST_TOPIC, 1)])
+    log("[mqtt] suscrito a {}, {}, {} y {}".format(
+        READINGS_TOPIC, STATUS_TOPIC, FORECAST_TOPIC, LEGACY_FORECAST_TOPIC))
 
 
 def _on_message(client, userdata, message):
@@ -50,6 +56,8 @@ def _on_message(client, userdata, message):
     try:
         if message.topic.endswith("/status"):
             _handle_status(message, log)
+        elif message.topic.endswith("/forecast"):
+            _handle_forecast(message, log)
         else:
             _handle_reading(message, log)
     except InvalidBatch as exc:
@@ -77,6 +85,20 @@ def _handle_status(message, log):
         known = set_link_status(device_code, status)
     if known and status == "offline":
         log("[mqtt] {} se ha caido (testamento del broker)".format(device_code))
+
+
+def _handle_forecast(message, log):
+    parts = message.topic.split("/")
+    if len(parts) >= 5 and parts[-3] == "device":
+        device_code = parts[-2]
+    elif len(parts) >= 5:
+        device_code = parts[-2]
+    else:
+        raise InvalidBatch("topic de pronostico invalido", ["topic"])
+    body = json.loads(message.payload.decode("utf-8"))
+    with db.connection_context():
+        store_forecast(device_code, body)
+    log("[mqtt] pronostico validado para {}".format(device_code))
 
 
 def build_client(log=print):

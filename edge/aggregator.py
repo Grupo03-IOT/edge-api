@@ -19,7 +19,7 @@ import config
 import thresholds
 from acoustics import leq, merge_hists, percentile_level, leq_from_hist
 from comfort import pmv_ppd, verdict, ASSUMPTIONS
-from models import Alert, Device, MinuteAggregate, RawBatch, db
+from models import Alert, Device, ForecastEvent, MinuteAggregate, RawBatch, db
 
 
 def minute_key_of(dt):
@@ -64,7 +64,7 @@ def aggregate_pending():
         exists = MinuteAggregate.get_or_none(
             (MinuteAggregate.room_id == row.room_id)
             & (MinuteAggregate.minute_key == row.minute_key))
-        if exists:
+        if exists and not exists.dirty:
             continue
         if aggregate_minute(row.room_id, row.minute_key):
             made += 1
@@ -101,7 +101,14 @@ def aggregate_minute(room_id, minute_key):
     expected_s = len(batches) * 10.0
     occupied_pct = 100.0 * occupied_s / expected_s if expected_s else 0.0
 
-    agg = MinuteAggregate.create(
+    forecast = (ForecastEvent
+                .select()
+                .where((ForecastEvent.room_id == room_id)
+                       & (ForecastEvent.minute_key == minute_key))
+                .order_by(ForecastEvent.generated_at.desc())
+                .first())
+
+    values = dict(
         room_id=room_id,
         minute_key=minute_key,
         ts=datetime.datetime.strptime(minute_key, "%Y-%m-%dT%H:%M"),
@@ -120,8 +127,28 @@ def aggregate_minute(room_id, minute_key):
         transitions=sum(b.transitions for b in batches),
         batches=len(batches),
         expected=6,
+        forecast_probability=forecast.probability if forecast else None,
+        forecast_horizon_min=forecast.horizon_min if forecast else None,
+        forecast_temperature_limit_c=forecast.temperature_limit_c if forecast else None,
+        forecast_model_version=forecast.model_version if forecast else None,
+        forecast_generated_at=forecast.generated_at if forecast else None,
     )
-    evaluate_rules(agg)
+    agg = MinuteAggregate.get_or_none(
+        (MinuteAggregate.room_id == room_id)
+        & (MinuteAggregate.minute_key == minute_key))
+    if agg is None:
+        agg = MinuteAggregate.create(**values)
+    else:
+        for name, value in values.items():
+            setattr(agg, name, value)
+        agg.revision += 1
+        agg.dirty = False
+        agg.uploaded = False
+        agg.save()
+    # Una correccion historica no debe abrir/cerrar alertas como si fuera actual.
+    latest = (MinuteAggregate.select().where(MinuteAggregate.room_id == room_id)
+              .order_by(MinuteAggregate.ts.desc()).first())
+    evaluate_rules(latest)
     return agg
 
 
@@ -142,10 +169,14 @@ def _rule_sustained_noise(agg):
                              config.NOISE_LIMIT_DBA, config.NOISE_LIMIT_MINUTES)
     recent = list(MinuteAggregate
                   .select()
-                  .where(MinuteAggregate.room_id == agg.room_id)
+            .where((MinuteAggregate.room_id == agg.room_id)
+                   & (MinuteAggregate.ts <= agg.ts))
                   .order_by(MinuteAggregate.ts.desc())
                   .limit(minutos))
-    over = (len(recent) >= minutos
+    consecutive = (len(recent) >= minutos and all(
+        (recent[i].ts - recent[i + 1].ts).total_seconds() == 60
+        for i in range(len(recent) - 1)))
+    over = (consecutive
             and all(m.laeq is not None and m.laeq > limite for m in recent))
     _toggle(agg, "sustained_noise", over,
             "Noise above {:.0f} dBA for {} min".format(limite, minutos),
@@ -217,7 +248,7 @@ def _device_state(room_id):
 
 def to_cloud_payload(agg):
     """Contrato Edge -> Cloud. Esto es lo que debe aceptar el Spring Boot."""
-    return {
+    payload = {
         "room_id": agg.room_id,
         "device": _device_state(agg.room_id),
         "ts": agg.ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -237,6 +268,15 @@ def to_cloud_payload(agg):
         },
         "quality": {"batches": agg.batches, "expected": agg.expected},
     }
+    if agg.forecast_probability is not None:
+        payload["forecast"] = {
+            "probability": agg.forecast_probability,
+            "horizon_min": agg.forecast_horizon_min,
+            "temperature_limit_c": agg.forecast_temperature_limit_c,
+            "model_version": agg.forecast_model_version,
+            "generated_at": agg.forecast_generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    return payload
 
 
 def upload_pending():
@@ -247,13 +287,15 @@ def upload_pending():
     """
     pending = list(MinuteAggregate
                    .select()
-                   .where(MinuteAggregate.uploaded == False)  # noqa: E712
+                   .where((MinuteAggregate.uploaded == False)  # noqa: E712
+                          & (MinuteAggregate.dirty == False))  # noqa: E712
                    .order_by(MinuteAggregate.ts)
                    .limit(config.UPLOAD_BATCH))
     if not pending:
         return 0, 0
 
-    payload = {"readings": [to_cloud_payload(a) for a in pending]}
+    payload = {"site_code": config.SITE_CODE,
+               "readings": [to_cloud_payload(a) for a in pending]}
     headers = {"Content-Type": "application/json"}
     if config.CLOUD_API_KEY:
         headers["X-API-Key"] = config.CLOUD_API_KEY
@@ -262,10 +304,14 @@ def upload_pending():
         r = requests.post(config.CLOUD_URL, json=payload,
                           headers=headers, timeout=config.CLOUD_TIMEOUT)
         if 200 <= r.status_code < 300:
-            ids = [a.id for a in pending]
             with db.atomic("IMMEDIATE"):
-                MinuteAggregate.update(uploaded=True).where(
-                    MinuteAggregate.id.in_(ids)).execute()
+                for agg in pending:
+                    # Durante la llamada HTTP puede haber llegado otro lote.
+                    # Solo confirmar la revision que efectivamente se envio.
+                    MinuteAggregate.update(uploaded=True).where(
+                        (MinuteAggregate.id == agg.id)
+                        & (MinuteAggregate.revision == agg.revision)
+                        & (MinuteAggregate.dirty == False)).execute()  # noqa: E712
             return len(pending), 0
         raise RuntimeError("HTTP {}".format(r.status_code))
     except Exception:

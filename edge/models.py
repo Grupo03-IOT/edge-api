@@ -39,6 +39,8 @@ class Device(BaseModel):
     fw_version = CharField(null=True)
     last_seen = DateTimeField(null=True)
     last_seq = IntegerField(default=-1)
+    boot_id = CharField(null=True)
+    last_batch_ts = DateTimeField(null=True)
     lost_batches = IntegerField(default=0)
     # Lo anuncia el testamento MQTT del dispositivo: el broker publica 'offline'
     # en su nombre cuando pierde la conexion. Es una noticia, no una deduccion.
@@ -50,6 +52,8 @@ class RawBatch(BaseModel):
     device = ForeignKeyField(Device, backref="batches")
     room_id = CharField(index=True)
     seq = IntegerField()
+    batch_key = CharField(null=True, unique=True)
+    payload_hash = CharField(null=True)
     ts = DateTimeField(index=True)          # hora declarada por el dispositivo
     minute_key = CharField(index=True)      # 'YYYY-MM-DDTHH:MM' -> clave de agregacion
     received_at = DateTimeField(default=datetime.datetime.utcnow, index=True)
@@ -102,10 +106,18 @@ class MinuteAggregate(BaseModel):
     batches = IntegerField(default=0)       # recibidos
     expected = IntegerField(default=6)      # 60 s / 10 s
 
+    forecast_probability = FloatField(null=True)
+    forecast_horizon_min = IntegerField(null=True)
+    forecast_temperature_limit_c = FloatField(null=True)
+    forecast_model_version = CharField(null=True)
+    forecast_generated_at = DateTimeField(null=True)
+
     # cola de subida al cloud: si no hay internet, esto se queda en False
     # y se reintenta. El local no se queda ciego.
     uploaded = BooleanField(default=False, index=True)
     upload_attempts = IntegerField(default=0)
+    dirty = BooleanField(default=False)
+    revision = IntegerField(default=1)
 
     class Meta:
         indexes = ((("room_id", "minute_key"), True),)   # unico
@@ -121,6 +133,21 @@ class Alert(BaseModel):
     opened_at = DateTimeField(default=datetime.datetime.utcnow)
     closed_at = DateTimeField(null=True)
     uploaded = BooleanField(default=False, index=True)
+
+
+class ForecastEvent(BaseModel):
+    """Latest validated device forecast, retained per device and room minute."""
+    device = ForeignKeyField(Device, backref="forecasts")
+    room_id = CharField(index=True)
+    minute_key = CharField(index=True)
+    probability = FloatField()
+    horizon_min = IntegerField()
+    temperature_limit_c = FloatField()
+    model_version = CharField()
+    generated_at = DateTimeField(index=True)
+
+    class Meta:
+        indexes = ((('device', 'minute_key'), True),)
 
 
 class RoomThreshold(BaseModel):
@@ -142,13 +169,54 @@ class RoomThreshold(BaseModel):
         indexes = ((("room_id", "metric"), True),)
 
 
-ALL_MODELS = [Device, RawBatch, MinuteAggregate, Alert, RoomThreshold]
+ALL_MODELS = [Device, RawBatch, MinuteAggregate, ForecastEvent, Alert, RoomThreshold]
 
 
 def init_db(path):
     db.init(path)
     db.connect(reuse_if_open=True)
+    # Migracion aditiva para conservar las bases usadas en demostraciones.
+    from playhouse.migrate import SqliteMigrator, migrate
+    migrator = SqliteMigrator(db)
+    additions = {Device: ("boot_id", "last_batch_ts"),
+                 RawBatch: ("batch_key", "payload_hash"),
+                 MinuteAggregate: ("dirty", "revision")}
+    tables = db.get_tables()
+    for model, names in additions.items():
+        table = model._meta.table_name
+        if table in tables:
+            columns = {c.name for c in db.get_columns(table)}
+            for name in names:
+                if name not in columns:
+                    migrate(migrator.add_column(table, name, model._meta.fields[name]))
     db.create_tables(ALL_MODELS)
+    # Peewee's create_tables is non-migrating. Add nullable columns so an
+    # existing Edge database can adopt forecasts without losing telemetry.
+    columns = {row[1] for row in db.execute_sql(
+        "PRAGMA table_info(minuteaggregate)").fetchall()}
+    additions = {
+        "forecast_probability": "REAL",
+        "forecast_horizon_min": "INTEGER",
+        "forecast_temperature_limit_c": "REAL",
+        "forecast_model_version": "TEXT",
+        "forecast_generated_at": "DATETIME",
+    }
+    for name, sql_type in additions.items():
+        if name not in columns:
+            db.execute_sql("ALTER TABLE minuteaggregate ADD COLUMN {} {}".format(name, sql_type))
+    db.execute_sql("CREATE UNIQUE INDEX IF NOT EXISTS rawbatch_batch_key "
+                   "ON rawbatch (batch_key)")
+    # Reconocer reintentos de clientes antiguos recibidos antes de actualizar.
+    # Los duplicados historicos se conservan; no se borran lecturas existentes.
+    from ingest import batch_key
+    with db.atomic("IMMEDIATE"):
+        for row in RawBatch.select().where(RawBatch.batch_key.is_null(True)):
+            if row.clock_suspect:
+                continue  # la marca de tiempo original no se guardaba
+            key = batch_key(row.device_id, None, row.seq,
+                            row.ts.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            if not RawBatch.select().where(RawBatch.batch_key == key).exists():
+                RawBatch.update(batch_key=key).where(RawBatch.id == row.id).execute()
     # create_tables no anade indices a una tabla que ya existe, y sin este la
     # purga recorre la tabla entera cada vez.
     db.execute_sql(
