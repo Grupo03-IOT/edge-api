@@ -38,6 +38,13 @@ NOISE_LIMIT_DBA = float(os.getenv("NOISE_LIMIT_DBA", "65"))
 NOISE_LIMIT_MINUTES = int(os.getenv("NOISE_LIMIT_MINUTES", "2"))
 PPD_LIMIT_PCT = float(os.getenv("PPD_LIMIT_PCT", "20"))
 
+# Limite de temperatura que se le ordena al dispositivo cuando su sala no tiene
+# umbral de temperatura propio, y rango que el firmware acepta (fuera de el
+# ignora la orden). El valor por defecto es el de fabrica del firmware.
+TEMP_LIMIT_DEFAULT_C = float(os.getenv("TEMP_LIMIT_DEFAULT_C", "25"))
+TEMP_LIMIT_MIN_C = float(os.getenv("TEMP_LIMIT_MIN_C", "18"))
+TEMP_LIMIT_MAX_C = float(os.getenv("TEMP_LIMIT_MAX_C", "30"))
+
 # Asunciones del modelo de confort (ver comfort.ASSUMPTIONS)
 CLO = float(os.getenv("CLO", "0.6"))
 MET = float(os.getenv("MET", "1.2"))
