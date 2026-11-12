@@ -19,7 +19,8 @@ import config
 import thresholds
 from acoustics import leq, merge_hists, percentile_level, leq_from_hist
 from comfort import pmv_ppd, verdict, ASSUMPTIONS
-from models import Alert, Device, ForecastEvent, MinuteAggregate, RawBatch, db
+from models import Alert, Device, ForecastEvent, MinuteAggregate, RawBatch, TelemetryBatch, db
+from telemetry import aggregate_values as telemetry_values, latest_sensors
 
 
 def minute_key_of(dt):
@@ -51,22 +52,25 @@ def aggregate_pending():
                     .group_by(RawBatch.room_id))
     }
 
-    rows = (RawBatch
-            .select(RawBatch.room_id, RawBatch.minute_key)
-            .distinct())
+    keys = {(row.room_id, row.minute_key) for row in RawBatch.select(
+        RawBatch.room_id, RawBatch.minute_key).distinct()}
+    keys.update((row.room_id, row.minute_key) for row in TelemetryBatch.select(
+        TelemetryBatch.room_id, TelemetryBatch.minute_key).distinct())
+    for room_id, minute_key in keys:
+        watermarks[room_id] = max(watermarks.get(room_id, ""), minute_key)
 
     made = 0
-    for row in rows:
-        closed = (row.minute_key < watermarks.get(row.room_id, "")
-                  or row.minute_key < now_key)
+    for room_id, minute_key in sorted(keys):
+        closed = (minute_key < watermarks.get(room_id, "")
+                  or minute_key < now_key)
         if not closed:
             continue
         exists = MinuteAggregate.get_or_none(
-            (MinuteAggregate.room_id == row.room_id)
-            & (MinuteAggregate.minute_key == row.minute_key))
+            (MinuteAggregate.room_id == room_id)
+            & (MinuteAggregate.minute_key == minute_key))
         if exists and not exists.dirty:
             continue
-        if aggregate_minute(row.room_id, row.minute_key):
+        if aggregate_minute(room_id, minute_key):
             made += 1
     return made
 
@@ -78,7 +82,8 @@ def aggregate_minute(room_id, minute_key):
                           & (RawBatch.minute_key == minute_key))
                    .order_by(RawBatch.ts))
     if not batches:
-        return None
+        values = telemetry_values(room_id, minute_key)
+        return _save_aggregate(values) if values else None
 
     # --- acustica ---
     # Leq del minuto = energetico sobre TODOS los valores de 1 s. Nunca la media
@@ -132,7 +137,13 @@ def aggregate_minute(room_id, minute_key):
         forecast_temperature_limit_c=forecast.temperature_limit_c if forecast else None,
         forecast_model_version=forecast.model_version if forecast else None,
         forecast_generated_at=forecast.generated_at if forecast else None,
+        sensors_json=latest_sensors(room_id, minute_key),
     )
+    return _save_aggregate(values)
+
+
+def _save_aggregate(values):
+    room_id, minute_key = values["room_id"], values["minute_key"]
     agg = MinuteAggregate.get_or_none(
         (MinuteAggregate.room_id == room_id)
         & (MinuteAggregate.minute_key == minute_key))
@@ -276,6 +287,8 @@ def to_cloud_payload(agg):
             "model_version": agg.forecast_model_version,
             "generated_at": agg.forecast_generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+    if agg.sensors_json:
+        payload["sensors"] = json.loads(agg.sensors_json)
     return payload
 
 
@@ -325,7 +338,8 @@ def upload_pending():
 def purge_old_raw():
     cutoff = datetime.datetime.utcnow() - datetime.timedelta(
         days=config.RAW_RETENTION_DAYS)
-    return RawBatch.delete().where(RawBatch.received_at < cutoff).execute()
+    return (RawBatch.delete().where(RawBatch.received_at < cutoff).execute()
+            + TelemetryBatch.delete().where(TelemetryBatch.received_at < cutoff).execute())
 
 
 # ----------------------------------------------------------------- loop ----

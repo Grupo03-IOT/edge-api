@@ -39,6 +39,12 @@ quedan en la cola hasta que responda.
 
 ## Conectar el ESP32 de la guia
 
+Si el dispositivo ya imprime temperatura, humedad, movimiento, distancia,
+potenciometro y botones, puedes conservar ese sketch y conectarlo por **USB**.
+Sigue [`docs/usb-local.md`](docs/usb-local.md): incluye Cloud, Edge y frontend
+locales y el puente `tools/serial_bridge.py`. Este camino usa
+`POST /api/v1/telemetry` y no necesita broker MQTT ni Wi-Fi en el ESP32.
+
 El firmware para DHT22, PIR, HC-SR04, potenciometro, buzzer y tres pulsadores esta
 en [`firmware/`](firmware/README.md). Respeta los GPIO de la guia y entrega los
 niveles del potenciometro por el contrato normal de ruido.
@@ -85,6 +91,7 @@ La implementacion C++ para el montaje actual esta en `firmware/zenroom_esp32`.
 | Verbo | Ruta | Para qué |
 |---|---|---|
 | `POST` | `/api/v1/readings` | lo que envía el dispositivo cada 10 s |
+| `POST` | `/api/v1/telemetry` | muestras fisicas del puente USB; no exige microfono |
 | `GET` | `/api/v1/rooms` | salas con su último minuto |
 | `GET` | `/api/v1/rooms/<id>/minutes` | la serie por minuto |
 | `GET` | `/api/v1/alerts` | alertas abiertas |

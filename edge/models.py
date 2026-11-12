@@ -80,6 +80,19 @@ class RawBatch(BaseModel):
         return json.loads(self.hist_json)
 
 
+class TelemetryBatch(BaseModel):
+    """Muestra del monitor serial; no requiere microfono ni datos acusticos."""
+    device = ForeignKeyField(Device, backref="telemetry")
+    room_id = CharField(index=True)
+    ts = DateTimeField(index=True)
+    minute_key = CharField(index=True)
+    batch_key = CharField(unique=True)
+    payload_hash = CharField()
+    payload_json = TextField()
+    received_at = DateTimeField(default=datetime.datetime.utcnow, index=True)
+    clock_suspect = BooleanField(default=False)
+
+
 class MinuteAggregate(BaseModel):
     """1 registro/minuto/sala. Esto es lo que viaja al cloud."""
     room_id = CharField(index=True)
@@ -111,6 +124,7 @@ class MinuteAggregate(BaseModel):
     forecast_temperature_limit_c = FloatField(null=True)
     forecast_model_version = CharField(null=True)
     forecast_generated_at = DateTimeField(null=True)
+    sensors_json = TextField(null=True)
 
     # cola de subida al cloud: si no hay internet, esto se queda en False
     # y se reintenta. El local no se queda ciego.
@@ -169,7 +183,7 @@ class RoomThreshold(BaseModel):
         indexes = ((("room_id", "metric"), True),)
 
 
-ALL_MODELS = [Device, RawBatch, MinuteAggregate, ForecastEvent, Alert, RoomThreshold]
+ALL_MODELS = [Device, RawBatch, TelemetryBatch, MinuteAggregate, ForecastEvent, Alert, RoomThreshold]
 
 
 def init_db(path):
@@ -180,7 +194,7 @@ def init_db(path):
     migrator = SqliteMigrator(db)
     additions = {Device: ("boot_id", "last_batch_ts"),
                  RawBatch: ("batch_key", "payload_hash"),
-                 MinuteAggregate: ("dirty", "revision")}
+                 MinuteAggregate: ("dirty", "revision", "sensors_json")}
     tables = db.get_tables()
     for model, names in additions.items():
         table = model._meta.table_name
