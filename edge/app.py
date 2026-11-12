@@ -22,7 +22,8 @@ import mqtt_ingest
 import thresholds
 from aggregator import start as start_worker, to_cloud_payload
 from ingest import InvalidBatch, store_batch
-from models import Alert, Device, MinuteAggregate, RawBatch, db, init_db
+from models import Alert, Device, MinuteAggregate, RawBatch, TelemetryBatch, db, init_db
+from telemetry import store_telemetry
 
 app = Flask(__name__)
 
@@ -57,6 +58,17 @@ def ingest():
         return jsonify(error="JSON invalido o ausente"), 400
     try:
         seq, suspect, duplicate = store_batch(body)
+    except InvalidBatch as exc:
+        return jsonify(error=exc.message, fields=exc.fields), 400
+    return jsonify(status="duplicate" if duplicate else "ok", seq=seq,
+                   clock_suspect=suspect), 200 if duplicate else 201
+
+
+@app.post("/api/v1/telemetry")
+def ingest_telemetry():
+    """DHT22, PIR, distancia, ADC y botones desde el puente USB."""
+    try:
+        seq, suspect, duplicate = store_telemetry(request.get_json(silent=True))
     except InvalidBatch as exc:
         return jsonify(error=exc.message, fields=exc.fields), 400
     return jsonify(status="duplicate" if duplicate else "ok", seq=seq,
@@ -119,6 +131,8 @@ def health():
         cloud_url=config.CLOUD_URL,
         devices=Device.select().count(),
         raw_batches=RawBatch.select().count(),
+        telemetry_batches=TelemetryBatch.select().count(),
+        cloud_credential_configured=bool(config.CLOUD_API_KEY),
         minutes=MinuteAggregate.select().count(),
         pending_upload=pending,
         open_alerts=Alert.select().where(Alert.closed_at.is_null(True)).count(),

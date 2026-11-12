@@ -10,6 +10,7 @@ __pycache__/
 
 # Credenciales del broker y del cloud
 .env
+serial-outbox.json*
 broker/passwd
 broker/data/
 
