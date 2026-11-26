@@ -20,22 +20,78 @@ El micrófono muestrea a **16 kHz**: 1 380 millones de muestras al día por sala
 grabar conversaciones de gente que no dio su consentimiento. **El Edge es donde el audio
 muere por diseño**: entra sonido, sale un número.
 
-## Levantarlo
+## How to run locally (cómo correrlo en local)
+
+Necesitas Python 3.11. El broker y el Cloud son opcionales: sin ellos el Edge sigue
+recibiendo por HTTP y deja en cola lo que no puede subir.
+
+**1. Entorno virtual y dependencias**
 
 ```bash
-python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-export CLOUD_URL=http://127.0.0.1:8080/api/v1/readings
-export MQTT_ENABLED=false        # true necesita Mosquitto; ver broker/
-python edge/app.py
+python -m venv .venv
+source .venv/bin/activate                 # Windows (Git Bash): source .venv/Scripts/activate
+pip install -r requirements.txt pytest
 ```
 
-Queda en `http://localhost:5000`. Sin el cloud levantado también funciona: los minutos se
-quedan en la cola hasta que responda.
+En PowerShell: `.\.venv\Scripts\Activate.ps1`.
 
-> El cloud **debe tener un local creado** antes de recibir nada, o rechaza la subida con
-> `MONITORING_NO_SITE_AVAILABLE`.
+**2. Variables de entorno.** Se leen del proceso; un `.env` no se carga solo. Lo mínimo:
+
+```bash
+export CLOUD_URL=http://127.0.0.1:8080/api/v1/readings
+export ALERTS_URL=http://127.0.0.1:8080/api/v1/alerts/events
+export CLOUD_API_KEY=<credencial del Cloud con readings:write, thresholds:read, edges:heartbeat y alerts:write>
+export SITE_CODE=site-1                   # el código del local creado en el Cloud
+export EDGE_CODE=edge-1                   # prefijo del source_key de las alertas
+export MQTT_ENABLED=false                 # true si levantas Mosquitto (paso 3)
+```
+
+El resto está en [Configuración](#configuración). Cómo emitir la credencial y el primer
+administrador: `cloud-api/README.md`.
+
+**3. Broker MQTT (si el ESP32 publica por Wi-Fi).** Mosquitto con usuario y clave, según
+[`broker/README.md`](broker/README.md):
+
+```bash
+mosquitto_passwd -c broker/passwd esp32
+mosquitto_passwd    broker/passwd edge-api
+mkdir -p broker/data && mosquitto -c broker/mosquitto.conf -v
+export MQTT_ENABLED=true MQTT_USERNAME=edge-api MQTT_PASSWORD=<clave>
+```
+
+El ESP32 apunta al IP de esta máquina en el puerto 1883.
+
+**4. Arrancar el Edge**
+
+```bash
+python edge/app.py                        # http://localhost:5000
+curl http://localhost:5000/api/v1/health
+```
+
+**5. Sin Cloud: el Cloud falso.** En otra terminal, `python tools/mock_cloud.py` escucha en
+`:8080`, imprime los minutos y guarda las alertas por `source_key`. Con
+`--known-rooms sala-01,sala-03` rechaza las alertas de otras salas como lo hace el Cloud
+(`404 MONITORING_ROOM_NOT_FOUND`).
+
+**6. Puente serie (ESP32 por USB, sin Wi-Fi ni broker).** Con el sketch original abierto en
+el puerto USB:
+
+```bash
+python tools/serial_bridge.py --list-ports
+python tools/serial_bridge.py --port COM5 --room sala-01 --device esp32-sala-01
+```
+
+Envía cada bloque a `POST /api/v1/telemetry` y guarda en `serial-outbox.json` lo que el
+Edge no confirmó. El recorrido completo, con Cloud y web locales, está en
+[`docs/usb-local.md`](docs/usb-local.md).
+
+**7. Pruebas**
+
+```bash
+python -m pytest -q
+```
+
+No necesitan broker, Cloud ni red: cada prueba usa un SQLite temporal y simula el Cloud.
 
 ## Conectar el ESP32 de la guia
 
@@ -46,8 +102,9 @@ locales y el puente `tools/serial_bridge.py`. Este camino usa
 `POST /api/v1/telemetry` y no necesita broker MQTT ni Wi-Fi en el ESP32.
 
 El firmware para DHT22, PIR, HC-SR04, potenciometro, buzzer y tres pulsadores esta
-en [`firmware/`](firmware/README.md). Respeta los GPIO de la guia y entrega los
-niveles del potenciometro por el contrato normal de ruido.
+en [`zenroom-embedded-app`](https://github.com/Grupo03-IOT/zenroom-embedded-app).
+Respeta los GPIO de la guia y entrega los niveles del potenciometro por el contrato
+normal de ruido.
 
 En PowerShell, desde esta carpeta:
 
@@ -84,7 +141,7 @@ La ocupación sigue el horario de oficina de `--timezone` (por defecto `America/
 `ts` que se envían siguen en UTC.
 
 Vive aquí y no en su propio repositorio porque hoy su única razón de ser es probar el Edge.
-La implementacion C++ para el montaje actual esta en `firmware/zenroom_esp32`.
+La implementacion C++ para el montaje actual esta en `zenroom-embedded-app`.
 
 ## Endpoints
 
@@ -94,7 +151,7 @@ La implementacion C++ para el montaje actual esta en `firmware/zenroom_esp32`.
 | `POST` | `/api/v1/telemetry` | muestras fisicas del puente USB; no exige microfono |
 | `GET` | `/api/v1/rooms` | salas con su último minuto |
 | `GET` | `/api/v1/rooms/<id>/minutes` | la serie por minuto |
-| `GET` | `/api/v1/alerts` | alertas abiertas |
+| `GET` | `/api/v1/alerts` | alertas abiertas; `?status=closed` o `?status=all`, con su estado de subida |
 | `GET` | `/api/v1/health` | estado, cola pendiente y contadores |
 
 ## Qué hay dentro
@@ -143,10 +200,37 @@ la nueva revision. El sobre enviado al Cloud incluye `site_code=SITE_CODE`.
 La actualizacion de SQLite es aditiva y se realiza al iniciar. Conserva lecturas
 y duplicados historicos; no corrige ni elimina automaticamente datos anteriores.
 
+## Alertas hacia el Cloud
+
+El Edge abre y cierra las alertas en local, sin internet, y las sube a
+`POST /api/v1/alerts/events` (`ALERTS_URL`) en el mismo ciclo que los minutos:
+
+```json
+{ "site_code": "site-1", "events": [
+  { "source_key": "edge-1:42", "room_id": "sala-03", "rule": "sustained_noise",
+    "severity": "warning", "message": "Noise above 65 dBA for 2 min", "value": 66.4,
+    "opened_at": "2026-11-08T14:10:00Z", "closed_at": null } ] }
+```
+
+- `source_key` es `EDGE_CODE:id local` y es la clave de idempotencia: reenviar actualiza, no
+  duplica. Una alerta sube abierta y vuelve a subir con `closed_at` cuando se cierra; si se
+  cerró antes de la primera subida, va una sola vez.
+- Sin red, o con una respuesta que no es 2xx, nada se marca y se reintenta en la siguiente
+  vuelta (`AGG_INTERVAL_S`).
+- Si el Cloud responde `MONITORING_ROOM_NOT_FOUND`, la alerta se marca fallida
+  (`upload_error`) y sale de la cola. Si el rechazo no dice qué evento fue, el lote se reenvía
+  uno por uno para que la sala desconocida no bloquee a las demás. También se acepta un 2xx
+  con `rejected: [{source_key, code}]`.
+- `GET /api/v1/health` informa `pending_alert_upload` y `failed_alert_upload`.
+
+**Migración de SQLite.** `init_db` añade a la tabla `alert` las columnas `closure_uploaded`
+y `upload_error` con `ALTER TABLE ... ADD COLUMN` al arrancar. No hace falta borrar `edge.db`:
+las alertas existentes se conservan y, como nunca se habían subido, entran en la cola.
+
 ## Pruebas de la conexion
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 ## Configuración
@@ -157,6 +241,7 @@ Todo por variables de entorno, con valores por defecto en `edge/config.py`. Las 
 |---|---|---|
 | `CLOUD_URL` | `http://127.0.0.1:8080/api/v1/readings` | a dónde sube |
 | `CLOUD_API_KEY` | vacío | la credencial que emite el cloud. Sin ella, 401 |
+| `ALERTS_URL` | `http://127.0.0.1:8080/api/v1/alerts/events` | a dónde suben las alertas. La credencial necesita `alerts:write` |
 | `EDGE_PORT` | `5000` | |
 | `EDGE_CODE` | `edge-1` | con qué nombre se presenta en el latido |
 | `SITE_CODE` | `site-1` | el código del local en el cloud. Si no existe allí, el latido recibe 404 |

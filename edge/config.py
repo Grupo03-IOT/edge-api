@@ -12,6 +12,10 @@ CLOUD_API_KEY = os.getenv("CLOUD_API_KEY", "")
 CLOUD_TIMEOUT = float(os.getenv("CLOUD_TIMEOUT", "5"))
 UPLOAD_BATCH = int(os.getenv("UPLOAD_BATCH", "60"))   # cuantos minutos por POST
 
+# A donde sube las alertas que abre y cierra. Misma credencial que las lecturas,
+# que en el Cloud necesita ademas el permiso alerts:write.
+ALERTS_URL = os.getenv("ALERTS_URL", "http://127.0.0.1:8080/api/v1/alerts/events")
+
 # Hilos del servidor. Con 20 salas entra un lote cada medio segundo, asi que
 # ocho sobran; subirlo solo aumentaria la contencion sobre SQLite.
 SERVER_THREADS = int(os.getenv("SERVER_THREADS", "8"))

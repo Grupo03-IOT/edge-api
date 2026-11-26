@@ -4,11 +4,12 @@ Agregacion por minuto + cola de subida al cloud.
 Corre en un hilo aparte del API. Cada AGG_INTERVAL_S:
   1. busca minutos completos sin agregar y los agrega
   2. evalua reglas de alerta
-  3. intenta subir al cloud lo que este pendiente
+  3. intenta subir al cloud lo que este pendiente (minutos y alertas)
   4. purga lotes crudos vencidos
 """
 import datetime
 import json
+import re
 import threading
 import time
 
@@ -335,6 +336,144 @@ def upload_pending():
         return 0, len(pending)
 
 
+# --------------------------------------------------------------- alertas ----
+
+# Codigo con el que el Cloud rechaza una alerta de una sala que no conoce.
+# Reintentarla no la arregla: se marca fallida y sale de la cola.
+ROOM_NOT_FOUND = "MONITORING_ROOM_NOT_FOUND"
+_EVENT_INDEX = re.compile(r"events\[(\d+)\]")
+
+
+def _iso(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
+
+
+def alert_event(alert):
+    """Contrato Edge -> Cloud de POST /api/v1/alerts/events, un evento."""
+    return {
+        "source_key": alert.source_key,
+        "room_id": alert.room_id,
+        "rule": alert.rule,
+        "severity": alert.severity,
+        "message": alert.message,
+        "value": alert.value,
+        "opened_at": _iso(alert.opened_at),
+        "closed_at": _iso(alert.closed_at),
+    }
+
+
+def pending_alerts_query():
+    """Alertas que el Cloud aun no conoce, o cuyo cierre aun no conoce."""
+    return (Alert.select()
+            .where(Alert.upload_error.is_null(True)
+                   & ((Alert.uploaded == False)  # noqa: E712
+                      | (Alert.closed_at.is_null(False)
+                         & (Alert.closure_uploaded == False))))  # noqa: E712
+            .order_by(Alert.id))
+
+
+def upload_alerts():
+    """
+    Sube las alertas abiertas y cerradas que el Cloud no tiene.
+
+    Mismo patron que upload_pending: si la red falla o el Cloud no responde 2xx,
+    nada se marca y la siguiente vuelta lo reintenta. Reenviar es seguro porque
+    el Cloud usa source_key como clave de idempotencia: un evento repetido
+    actualiza, no duplica.
+
+    Devuelve (subidas, en_cola, fallidas).
+    """
+    pending = list(pending_alerts_query().limit(config.UPLOAD_BATCH))
+    if not pending:
+        return 0, 0, 0
+    return _send_alerts(pending)
+
+
+def _send_alerts(alerts):
+    events = [alert_event(a) for a in alerts]
+    headers = {"Content-Type": "application/json"}
+    if config.CLOUD_API_KEY:
+        headers["X-API-Key"] = config.CLOUD_API_KEY
+    try:
+        r = requests.post(config.ALERTS_URL,
+                          json={"site_code": config.SITE_CODE, "events": events},
+                          headers=headers, timeout=config.CLOUD_TIMEOUT)
+    except Exception:
+        return 0, len(alerts), 0
+
+    body = _json_or_empty(r)
+    if 200 <= r.status_code < 300:
+        rejected = {item.get("source_key"): item.get("code") or ROOM_NOT_FOUND
+                    for item in body.get("rejected") or []
+                    if isinstance(item, dict)}
+        failed = [a for a in alerts if a.source_key in rejected]
+        for a in failed:
+            _mark_failed(a, rejected[a.source_key])
+        sent = [(a, e) for a, e in zip(alerts, events) if a.source_key not in rejected]
+        _mark_uploaded(sent)
+        return len(sent), 0, len(failed)
+
+    if body.get("code") == ROOM_NOT_FOUND:
+        culprits = _rejected_indexes(body, len(alerts))
+        if culprits:
+            for i in culprits:
+                _mark_failed(alerts[i], ROOM_NOT_FOUND)
+            rest = [a for i, a in enumerate(alerts) if i not in culprits]
+            if not rest:
+                return 0, 0, len(culprits)
+            sent, queued, failed = _send_alerts(rest)
+            return sent, queued, failed + len(culprits)
+        if len(alerts) == 1:
+            _mark_failed(alerts[0], ROOM_NOT_FOUND)
+            return 0, 0, 1
+        # El Cloud rechazo el lote entero sin decir que evento: se manda uno
+        # por uno para que la sala desconocida no bloquee a las demas.
+        totals = [0, 0, 0]
+        for a in alerts:
+            for i, n in enumerate(_send_alerts([a])):
+                totals[i] += n
+        return tuple(totals)
+
+    return 0, len(alerts), 0
+
+
+def _json_or_empty(response):
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _rejected_indexes(body, count):
+    """Los eventos que senala la lista errors[].field (events[i].room_id)."""
+    found = set()
+    for item in body.get("errors") or []:
+        match = _EVENT_INDEX.search(str((item or {}).get("field", "")))
+        if match and int(match.group(1)) < count:
+            found.add(int(match.group(1)))
+    return found
+
+
+def _mark_uploaded(sent):
+    """
+    Confirma lo enviado. El cierre solo se confirma si el evento ya lo llevaba:
+    una alerta que se cerro durante la llamada HTTP sigue en la cola.
+    """
+    with db.atomic("IMMEDIATE"):
+        for alert, event in sent:
+            changes = {Alert.uploaded: True}
+            if event["closed_at"] is not None:
+                changes[Alert.closure_uploaded] = True
+            Alert.update(changes).where(Alert.id == alert.id).execute()
+
+
+def _mark_failed(alert, code):
+    with db.atomic("IMMEDIATE"):
+        Alert.update(upload_error=str(code)[:120]).where(
+            Alert.id == alert.id).execute()
+
+
 def purge_old_raw():
     cutoff = datetime.datetime.utcnow() - datetime.timedelta(
         days=config.RAW_RETENTION_DAYS)
@@ -363,6 +502,10 @@ def worker(stop_event, log=print):
                 if made or sent or queued:
                     log("[agg] +{} minutos | subidos {} | en cola {}".format(
                         made, sent, queued))
+                a_sent, a_queued, a_failed = upload_alerts()
+                if a_sent or a_queued or a_failed:
+                    log("[alertas] subidas {} | en cola {} | rechazadas {}".format(
+                        a_sent, a_queued, a_failed))
 
                 # La purga es retencion de 14 dias, no trabajo de cada ciclo:
                 # borrar por fecha bloquea la escritura, y hacerlo seis veces

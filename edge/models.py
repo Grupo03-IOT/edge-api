@@ -10,6 +10,8 @@ Esa reduccion ES la justificacion de la capa Edge.
 import datetime
 import json
 
+import config
+
 from peewee import (
     Model, SqliteDatabase, CharField, IntegerField, FloatField,
     DateTimeField, BooleanField, TextField, ForeignKeyField,
@@ -146,7 +148,18 @@ class Alert(BaseModel):
     value = FloatField(null=True)
     opened_at = DateTimeField(default=datetime.datetime.utcnow)
     closed_at = DateTimeField(null=True)
+    # Cola de subida al Cloud. La apertura y el cierre se confirman por
+    # separado: una alerta subida abierta vuelve a subir cuando se cierra.
     uploaded = BooleanField(default=False, index=True)
+    closure_uploaded = BooleanField(default=False)
+    # Codigo con el que el Cloud rechazo la alerta para siempre (sala que no
+    # conoce). Una alerta con error ya no se reintenta.
+    upload_error = CharField(null=True)
+
+    @property
+    def source_key(self):
+        """Clave de idempotencia en el Cloud: codigo del Edge + id local."""
+        return "{}:{}".format(config.EDGE_CODE, self.id)
 
 
 class ForecastEvent(BaseModel):
@@ -194,7 +207,10 @@ def init_db(path):
     migrator = SqliteMigrator(db)
     additions = {Device: ("boot_id", "last_batch_ts"),
                  RawBatch: ("batch_key", "payload_hash"),
-                 MinuteAggregate: ("dirty", "revision", "sensors_json")}
+                 MinuteAggregate: ("dirty", "revision", "sensors_json"),
+                 # Bases anteriores a la subida de alertas: ALTER TABLE alert
+                 # ADD COLUMN, sin borrar las alertas ya registradas.
+                 Alert: ("closure_uploaded", "upload_error")}
     tables = db.get_tables()
     for model, names in additions.items():
         table = model._meta.table_name

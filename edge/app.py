@@ -20,7 +20,7 @@ import config
 import heartbeat
 import mqtt_ingest
 import thresholds
-from aggregator import start as start_worker, to_cloud_payload
+from aggregator import pending_alerts_query, start as start_worker, to_cloud_payload
 from ingest import InvalidBatch, store_batch
 from models import Alert, Device, MinuteAggregate, RawBatch, TelemetryBatch, db, init_db
 from telemetry import store_telemetry
@@ -110,13 +110,28 @@ def minutes(room_id):
 
 @app.get("/api/v1/alerts")
 def alerts():
-    rows = (Alert.select()
-            .where(Alert.closed_at.is_null(True))
-            .order_by(Alert.opened_at.desc()))
+    """
+    Alertas del local. Por defecto las abiertas; ?status=closed las cerradas y
+    ?status=all todas. Cada una dice si el Cloud ya la tiene.
+    """
+    status = request.args.get("status", "open").lower()
+    query = Alert.select()
+    if status == "open":
+        query = query.where(Alert.closed_at.is_null(True))
+    elif status == "closed":
+        query = query.where(Alert.closed_at.is_null(False))
+    elif status != "all":
+        return jsonify(error="status debe ser open, closed o all"), 400
+    rows = query.order_by(Alert.opened_at.desc()).limit(500)
     return jsonify(alerts=[{
+        "id": a.id, "source_key": a.source_key,
         "room_id": a.room_id, "rule": a.rule, "severity": a.severity,
         "message": a.message, "value": a.value,
         "opened_at": a.opened_at.isoformat() + "Z",
+        "closed_at": a.closed_at.isoformat() + "Z" if a.closed_at else None,
+        "uploaded": a.uploaded,
+        "closure_uploaded": a.closure_uploaded,
+        "upload_error": a.upload_error,
     } for a in rows])
 
 
@@ -136,6 +151,9 @@ def health():
         minutes=MinuteAggregate.select().count(),
         pending_upload=pending,
         open_alerts=Alert.select().where(Alert.closed_at.is_null(True)).count(),
+        pending_alert_upload=pending_alerts_query().count(),
+        failed_alert_upload=Alert.select().where(
+            Alert.upload_error.is_null(False)).count(),
     )
 
 
@@ -143,6 +161,7 @@ if __name__ == "__main__":
     init_db(config.DB_PATH)
     print("Edge API  ->  http://{}:{}".format(config.HOST, config.PORT))
     print("Cloud     ->  {}".format(config.CLOUD_URL))
+    print("Alertas   ->  {}".format(config.ALERTS_URL))
     start_worker()
     thresholds.start()
     print("Umbrales ->  {}  cada {}s".format(
