@@ -9,7 +9,6 @@ Corre en un hilo aparte del API. Cada AGG_INTERVAL_S:
 """
 import datetime
 import json
-import re
 import threading
 import time
 
@@ -338,10 +337,15 @@ def upload_pending():
 
 # --------------------------------------------------------------- alertas ----
 
-# Codigo con el que el Cloud rechaza una alerta de una sala que no conoce.
-# Reintentarla no la arregla: se marca fallida y sale de la cola.
+# Rechazos del Cloud que reintentar no arregla: la alerta se marca fallida y sale
+# de la cola. 404 de sala desconocida y cualquier 400 (lote vacio, severidad o
+# regla invalidas, cierre anterior a la apertura). Un 404 con otro codigo, un
+# 401/403 o un 5xx si se reintentan: son configuracion o caidas, no la alerta.
 ROOM_NOT_FOUND = "MONITORING_ROOM_NOT_FOUND"
-_EVENT_INDEX = re.compile(r"events\[(\d+)\]")
+
+
+def _is_permanent(status, code):
+    return status == 400 or (status == 404 and code == ROOM_NOT_FOUND)
 
 
 def _iso(dt):
@@ -401,40 +405,23 @@ def _send_alerts(alerts):
     except Exception:
         return 0, len(alerts), 0
 
-    body = _json_or_empty(r)
     if 200 <= r.status_code < 300:
-        rejected = {item.get("source_key"): item.get("code") or ROOM_NOT_FOUND
-                    for item in body.get("rejected") or []
-                    if isinstance(item, dict)}
-        failed = [a for a in alerts if a.source_key in rejected]
-        for a in failed:
-            _mark_failed(a, rejected[a.source_key])
-        sent = [(a, e) for a, e in zip(alerts, events) if a.source_key not in rejected]
-        _mark_uploaded(sent)
-        return len(sent), 0, len(failed)
+        _mark_uploaded(list(zip(alerts, events)))
+        return len(alerts), 0, 0
 
-    if body.get("code") == ROOM_NOT_FOUND:
-        culprits = _rejected_indexes(body, len(alerts))
-        if culprits:
-            for i in culprits:
-                _mark_failed(alerts[i], ROOM_NOT_FOUND)
-            rest = [a for i, a in enumerate(alerts) if i not in culprits]
-            if not rest:
-                return 0, 0, len(culprits)
-            sent, queued, failed = _send_alerts(rest)
-            return sent, queued, failed + len(culprits)
-        if len(alerts) == 1:
-            _mark_failed(alerts[0], ROOM_NOT_FOUND)
-            return 0, 0, 1
-        # El Cloud rechazo el lote entero sin decir que evento: se manda uno
-        # por uno para que la sala desconocida no bloquee a las demas.
-        totals = [0, 0, 0]
-        for a in alerts:
-            for i, n in enumerate(_send_alerts([a])):
-                totals[i] += n
-        return tuple(totals)
-
-    return 0, len(alerts), 0
+    code = _json_or_empty(r).get("code") or "HTTP_{}".format(r.status_code)
+    if not _is_permanent(r.status_code, code):
+        return 0, len(alerts), 0
+    if len(alerts) == 1:
+        _mark_failed(alerts[0], code)
+        return 0, 0, 1
+    # El Cloud rechaza el lote ENTERO sin decir que evento fallo (no guarda
+    # nada). Se manda uno por uno: el culpable queda fallido y el resto sube.
+    totals = [0, 0, 0]
+    for alert in alerts:
+        for i, n in enumerate(_send_alerts([alert])):
+            totals[i] += n
+    return tuple(totals)
 
 
 def _json_or_empty(response):
@@ -443,16 +430,6 @@ def _json_or_empty(response):
     except ValueError:
         return {}
     return body if isinstance(body, dict) else {}
-
-
-def _rejected_indexes(body, count):
-    """Los eventos que senala la lista errors[].field (events[i].room_id)."""
-    found = set()
-    for item in body.get("errors") or []:
-        match = _EVENT_INDEX.search(str((item or {}).get("field", "")))
-        if match and int(match.group(1)) < count:
-            found.add(int(match.group(1)))
-    return found
 
 
 def _mark_uploaded(sent):

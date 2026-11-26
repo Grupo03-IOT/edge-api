@@ -82,7 +82,8 @@ class AlertUploadTest(unittest.TestCase):
         alert = self.open_alert()
         event = aggregator.alert_event(alert)
         for _ in range(2):
-            r = self.cloud.post("/api/v1/alerts/events", json={"events": [event]})
+            r = self.cloud.post("/api/v1/alerts/events",
+                                json={"site_code": "site-1", "events": [event]})
             self.assertEqual(200, r.status_code)
         self.assertEqual(1, len(mock_cloud.STATE["alerts"]))
 
@@ -117,8 +118,10 @@ class AlertUploadTest(unittest.TestCase):
         mock_cloud.STATE["known_rooms"] = {"sala-01"}
         unknown = self.open_alert("sala-99")
         known = self.open_alert("sala-01")
-        with patch.object(aggregator.requests, "post", side_effect=self.to_mock_cloud):
+        with patch.object(aggregator.requests, "post", side_effect=self.to_mock_cloud) as post:
+            # El Cloud rechaza el lote entero; el Edge lo reparte uno por uno.
             self.assertEqual((1, 0, 1), aggregator.upload_alerts())
+            self.assertEqual(3, post.call_count)
             self.assertEqual((0, 0, 0), aggregator.upload_alerts())
         self.assertEqual("MONITORING_ROOM_NOT_FOUND", Alert.get_by_id(unknown.id).upload_error)
         self.assertFalse(Alert.get_by_id(unknown.id).uploaded)
@@ -129,30 +132,49 @@ class AlertUploadTest(unittest.TestCase):
             self.assertEqual((0, 0, 0), aggregator.upload_alerts())
         post.assert_not_called()
 
-    def test_whole_batch_rejected_without_detail_is_retried_one_by_one(self):
-        unknown = self.open_alert("sala-99")
-        known = self.open_alert("sala-01")
-
-        def cloud(url, json, headers, timeout):
-            if any(e["room_id"] == "sala-99" for e in json["events"]):
-                return reply(404, {"code": "MONITORING_ROOM_NOT_FOUND"})
-            return reply(200, {"accepted": len(json["events"])})
-
-        with patch.object(aggregator.requests, "post", side_effect=cloud) as post:
+    def test_a_400_is_permanent_and_only_the_bad_event_fails(self):
+        bad = self.open_alert("sala-01", rule="Bad-Rule")
+        good = self.open_alert("sala-02")
+        with patch.object(aggregator.requests, "post", side_effect=self.to_mock_cloud) as post:
             self.assertEqual((1, 0, 1), aggregator.upload_alerts())
-        self.assertEqual(3, post.call_count)
-        self.assertEqual("MONITORING_ROOM_NOT_FOUND", Alert.get_by_id(unknown.id).upload_error)
-        self.assertTrue(Alert.get_by_id(known.id).uploaded)
+            self.assertEqual((0, 0, 0), aggregator.upload_alerts())
+        self.assertEqual(3, post.call_count)   # lote rechazado, luego uno por uno
+        self.assertEqual("ALERTING_INVALID_ALERT_RULE", Alert.get_by_id(bad.id).upload_error)
+        self.assertTrue(Alert.get_by_id(good.id).uploaded)
+        self.assertEqual([good.source_key], list(mock_cloud.STATE["alerts"]))
 
-    def test_rejected_list_in_a_2xx_reply_marks_only_those(self):
-        unknown = self.open_alert("sala-99")
-        known = self.open_alert("sala-01")
-        body = {"accepted": 1, "rejected": [
-            {"source_key": unknown.source_key, "code": "MONITORING_ROOM_NOT_FOUND"}]}
-        with patch.object(aggregator.requests, "post", return_value=reply(200, body)):
-            self.assertEqual((1, 0, 1), aggregator.upload_alerts())
-        self.assertEqual("MONITORING_ROOM_NOT_FOUND", Alert.get_by_id(unknown.id).upload_error)
-        self.assertTrue(Alert.get_by_id(known.id).uploaded)
+    def test_every_400_code_of_the_contract_is_permanent(self):
+        for code in ("ALERTING_ALERT_BATCH_EMPTY", "ALERTING_UNKNOWN_ALERT_SEVERITY",
+                     "ALERTING_INVALID_ALERT_RULE", "ALERTING_ALERT_CLOSED_BEFORE_OPENED",
+                     "MONITORING_SITE_CODE_REQUIRED"):
+            with self.subTest(code=code):
+                alert = self.open_alert("sala-" + code.lower()[:20])
+                with patch.object(aggregator.requests, "post",
+                                  return_value=reply(400, {"code": code})):
+                    self.assertEqual((0, 0, 1), aggregator.upload_alerts())
+                self.assertEqual(code, Alert.get_by_id(alert.id).upload_error)
+
+    def test_a_404_with_another_code_is_retried(self):
+        alert = self.open_alert()
+        with patch.object(aggregator.requests, "post",
+                          return_value=reply(404, {"code": "MONITORING_SITE_NOT_FOUND"})):
+            self.assertEqual((0, 1, 0), aggregator.upload_alerts())
+        self.assertIsNone(Alert.get_by_id(alert.id).upload_error)
+
+    def test_the_mock_mirrors_the_cloud_validation(self):
+        alert = self.open_alert()
+        event = aggregator.alert_event(alert)
+        cases = (({"events": [event]}, 400, "MONITORING_SITE_CODE_REQUIRED"),
+                 ({"site_code": "s", "events": []}, 400, "ALERTING_ALERT_BATCH_EMPTY"),
+                 ({"site_code": "s", "events": [dict(event, severity="high")]},
+                  400, "ALERTING_UNKNOWN_ALERT_SEVERITY"),
+                 ({"site_code": "s", "events": [dict(event, closed_at="2000-01-01T00:00:00Z")]},
+                  400, "ALERTING_ALERT_CLOSED_BEFORE_OPENED"))
+        for body, status, code in cases:
+            with self.subTest(code=code):
+                r = self.cloud.post("/api/v1/alerts/events", json=body)
+                self.assertEqual((status, code), (r.status_code, r.get_json()["code"]))
+        self.assertEqual({}, mock_cloud.STATE["alerts"])
 
     def test_a_close_during_the_http_call_stays_queued(self):
         alert = self.open_alert()
@@ -172,11 +194,12 @@ class AlertUploadTest(unittest.TestCase):
     def test_api_key_and_site_code_are_sent(self):
         self.open_alert()
         with patch.object(config, "CLOUD_API_KEY", "k-123"), \
+                patch.object(config, "SITE_CODE", "c7iot-local"), \
                 patch.object(aggregator.requests, "post",
                              return_value=reply(200, {"accepted": 1})) as post:
             aggregator.upload_alerts()
         self.assertEqual("k-123", post.call_args.kwargs["headers"]["X-API-Key"])
-        self.assertEqual(config.SITE_CODE, post.call_args.kwargs["json"]["site_code"])
+        self.assertEqual("c7iot-local", post.call_args.kwargs["json"]["site_code"])
 
     def test_edge_endpoint_lists_closed_alerts_with_status_all(self):
         self.open_alert("sala-01")

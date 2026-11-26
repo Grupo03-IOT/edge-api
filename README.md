@@ -217,10 +217,13 @@ El Edge abre y cierra las alertas en local, sin internet, y las sube a
   cerró antes de la primera subida, va una sola vez.
 - Sin red, o con una respuesta que no es 2xx, nada se marca y se reintenta en la siguiente
   vuelta (`AGG_INTERVAL_S`).
-- Si el Cloud responde `MONITORING_ROOM_NOT_FOUND`, la alerta se marca fallida
-  (`upload_error`) y sale de la cola. Si el rechazo no dice qué evento fue, el lote se reenvía
-  uno por uno para que la sala desconocida no bloquee a las demás. También se acepta un 2xx
-  con `rejected: [{source_key, code}]`.
+- `site_code` va siempre (`SITE_CODE`): sin él, el Cloud responde
+  `400 MONITORING_SITE_CODE_REQUIRED` cuando tiene más de un local.
+- `404 MONITORING_ROOM_NOT_FOUND` y cualquier `400` (lote vacío, severidad o regla inválidas,
+  cierre anterior a la apertura) son definitivos: el Cloud rechaza el lote entero y no guarda
+  nada. Si el lote tenía una sola alerta, se marca fallida (`upload_error` con el código) y sale
+  de la cola; si tenía varias, se reenvían una por una para que solo falle la culpable. Un 404
+  con otro código, 401/403 y 5xx se reintentan.
 - `GET /api/v1/health` informa `pending_alert_upload` y `failed_alert_upload`.
 
 **Migración de SQLite.** `init_db` añade a la tabla `alert` las columnas `closure_uploaded`
