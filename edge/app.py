@@ -18,6 +18,7 @@ from flask import Flask, jsonify, request
 
 import config
 import heartbeat
+import device_commands
 import mqtt_ingest
 import thresholds
 from aggregator import start as start_worker, to_cloud_payload
@@ -144,18 +145,22 @@ if __name__ == "__main__":
     print("Edge API  ->  http://{}:{}".format(config.HOST, config.PORT))
     print("Cloud     ->  {}".format(config.CLOUD_URL))
     start_worker()
-    thresholds.start()
+    mqtt_client = None
+    if config.MQTT_ENABLED:
+        print("MQTT     ->  {}:{}  prefijo {}/{}".format(
+            config.MQTT_HOST, config.MQTT_PORT, config.MQTT_PREFIX, config.SITE_CODE))
+        mqtt_client, _ = mqtt_ingest.start()
+    else:
+        print("MQTT     ->  desactivado")
+    # Cada vez que se refrescan los umbrales, cada dispositivo recibe su limite
+    # de temperatura por el canal de ordenes (ver device_commands.py).
+    thresholds.start(on_refresh=(
+        (lambda: device_commands.sync(mqtt_client, print)) if mqtt_client else None))
     print("Umbrales ->  {}  cada {}s".format(
         config.THRESHOLDS_URL, config.THRESHOLDS_REFRESH_S))
     heartbeat.start()
     print("Latido   ->  {}  cada {}s como {} en {}".format(
         config.HEARTBEAT_URL, config.HEARTBEAT_S, config.EDGE_CODE, config.SITE_CODE))
-    if config.MQTT_ENABLED:
-        print("MQTT     ->  {}:{}  prefijo {}/{}".format(
-            config.MQTT_HOST, config.MQTT_PORT, config.MQTT_PREFIX, config.SITE_CODE))
-        mqtt_ingest.start()
-    else:
-        print("MQTT     ->  desactivado")
     # El servidor de Flask avisa el mismo de que no es para produccion: es de un
     # solo proceso y no aguanta carga ni errores. waitress es WSGI de verdad y
     # no necesita configuracion. Si no esta instalado se sigue, pero avisando:

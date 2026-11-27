@@ -73,17 +73,28 @@ def refresh(log=print):
     return len(filas)
 
 
-def _worker(stop_event, log):
+def _worker(stop_event, log, on_refresh):
     while not stop_event.is_set():
         cuantos = refresh(log)
         if cuantos:
             log("Umbrales: {} vigentes".format(cuantos))
+        if on_refresh is not None:
+            try:
+                on_refresh()
+            except Exception as ex:
+                # Lo que se haga con los umbrales nuevos no debe detener la descarga.
+                log("Umbrales: error al aplicarlos ({})".format(ex))
         stop_event.wait(config.THRESHOLDS_REFRESH_S)
 
 
-def start(log=print):
-    """Refresca en segundo plano. No tumba el Edge si el cloud no responde."""
+def start(log=print, on_refresh=None):
+    """
+    Refresca en segundo plano. No tumba el Edge si el cloud no responde.
+
+    on_refresh se llama despues de cada intento de descarga, con o sin cambios:
+    con internet caido siguen vigentes los ultimos umbrales conocidos.
+    """
     stop_event = threading.Event()
-    t = threading.Thread(target=_worker, args=(stop_event, log), daemon=True)
+    t = threading.Thread(target=_worker, args=(stop_event, log, on_refresh), daemon=True)
     t.start()
     return stop_event, t
