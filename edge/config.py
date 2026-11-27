@@ -12,6 +12,10 @@ CLOUD_API_KEY = os.getenv("CLOUD_API_KEY", "")
 CLOUD_TIMEOUT = float(os.getenv("CLOUD_TIMEOUT", "5"))
 UPLOAD_BATCH = int(os.getenv("UPLOAD_BATCH", "60"))   # cuantos minutos por POST
 
+# A donde sube las alertas que abre y cierra. Misma credencial que las lecturas,
+# que en el Cloud necesita ademas el permiso alerts:write.
+ALERTS_URL = os.getenv("ALERTS_URL", "http://127.0.0.1:8080/api/v1/alerts/events")
+
 # Hilos del servidor. Con 20 salas entra un lote cada medio segundo, asi que
 # ocho sobran; subirlo solo aumentaria la contencion sobre SQLite.
 SERVER_THREADS = int(os.getenv("SERVER_THREADS", "8"))
@@ -37,6 +41,13 @@ EDGE_VERSION = "0.1.0"
 NOISE_LIMIT_DBA = float(os.getenv("NOISE_LIMIT_DBA", "65"))
 NOISE_LIMIT_MINUTES = int(os.getenv("NOISE_LIMIT_MINUTES", "2"))
 PPD_LIMIT_PCT = float(os.getenv("PPD_LIMIT_PCT", "20"))
+
+# Limite de temperatura que se le ordena al dispositivo cuando su sala no tiene
+# umbral de temperatura propio, y rango que el firmware acepta (fuera de el
+# ignora la orden). El valor por defecto es el de fabrica del firmware.
+TEMP_LIMIT_DEFAULT_C = float(os.getenv("TEMP_LIMIT_DEFAULT_C", "25"))
+TEMP_LIMIT_MIN_C = float(os.getenv("TEMP_LIMIT_MIN_C", "18"))
+TEMP_LIMIT_MAX_C = float(os.getenv("TEMP_LIMIT_MAX_C", "30"))
 
 # Asunciones del modelo de confort (ver comfort.ASSUMPTIONS)
 CLO = float(os.getenv("CLO", "0.6"))
