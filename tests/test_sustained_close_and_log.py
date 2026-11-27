@@ -1,5 +1,7 @@
 """US22 cierre solo tras N minutos normales; TS25 eventos con sala y periodo."""
 import datetime
+import importlib
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -20,7 +22,7 @@ from models import Alert, MinuteAggregate, db, init_db
 T0 = datetime.datetime(2099, 1, 1, 10, 0)
 
 
-class SustainedCloseTest(unittest.TestCase):
+class AlertRulesCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         init_db(str(Path(self.temp.name) / "test.db"))
@@ -52,6 +54,10 @@ class SustainedCloseTest(unittest.TestCase):
 
     def alert(self, rule):
         return Alert.get((Alert.room_id == "sala-1") & (Alert.rule == rule))
+
+
+class SustainedCloseTest(AlertRulesCase):
+    """Con ALERT_CLOSE_MINUTES definida (3 en estos casos)."""
 
     def test_noise_stays_open_for_n_minus_1_normal_minutes(self):
         self.feed(70), self.feed(70)
@@ -105,6 +111,78 @@ class SustainedCloseTest(unittest.TestCase):
             self.feed(50, base=past)
         alert = self.alert("sustained_noise")
         self.assertEqual(alert.opened_at, alert.closed_at)
+
+
+class RoomCloseWindowTest(AlertRulesCase):
+    """Sin ALERT_CLOSE_MINUTES, la ventana de cierre es la del umbral de la sala."""
+
+    RULES = ("sustained_noise", "thermal_discomfort")
+
+    def setUp(self):
+        super().setUp()
+        self.override(None)
+
+    def override(self, minutes):
+        p = patch.object(config, "ALERT_CLOSE_MINUTES", minutes)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def room_thresholds(self, minutes):
+        limits = {"laeq": 65.0, "ppd": 20.0}
+        aggregator.thresholds.for_room.side_effect = (
+            lambda room_id, metric: SimpleNamespace(
+                warn_value=limits[metric], sustained_minutes=minutes))
+
+    def assert_closes_at(self, rule, minutes):
+        for _ in range(minutes - 1):
+            self.feed(50)
+        self.assertIsNone(self.alert(rule).closed_at)
+        last = self.feed(50)
+        self.assertEqual(last + datetime.timedelta(minutes=1),
+                         self.alert(rule).closed_at)
+
+    def test_room_with_5_minutes_closes_noise_at_5_not_at_4(self):
+        self.room_thresholds(5)
+        for _ in range(5):
+            self.feed(70)
+        self.assert_closes_at("sustained_noise", 5)
+
+    def test_room_with_5_minutes_closes_thermal_at_5_not_at_4(self):
+        self.room_thresholds(5)
+        self.feed(40, ppd=40.0)
+        self.assert_closes_at("thermal_discomfort", 5)
+
+    def test_room_without_threshold_closes_with_the_default_window(self):
+        self.feed(70, ppd=40.0), self.feed(70, ppd=40.0)
+        self.feed(50)
+        for rule in self.RULES:
+            self.assertIsNone(self.alert(rule).closed_at)
+        self.feed(50)
+        for rule in self.RULES:
+            self.assertIsNotNone(self.alert(rule).closed_at)
+
+    def test_env_override_wins_over_the_room_window(self):
+        self.room_thresholds(5)
+        self.override(3)
+        for _ in range(5):
+            self.feed(70, ppd=40.0)
+        self.feed(50), self.feed(50)
+        for rule in self.RULES:
+            self.assertIsNone(self.alert(rule).closed_at)
+        self.feed(50)
+        for rule in self.RULES:
+            self.assertIsNotNone(self.alert(rule).closed_at)
+
+
+class CloseMinutesSettingTest(unittest.TestCase):
+    def load(self, value):
+        self.addCleanup(importlib.reload, config)
+        with patch.dict(os.environ, {"ALERT_CLOSE_MINUTES": value}):
+            return importlib.reload(config).ALERT_CLOSE_MINUTES
+
+    def test_override_only_when_the_variable_is_set(self):
+        self.assertIsNone(self.load(""))
+        self.assertEqual(7, self.load("7"))
 
 
 class ProcessingEventLogTest(unittest.TestCase):

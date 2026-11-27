@@ -225,9 +225,13 @@ El Edge abre y cierra las alertas en local, sin internet, y las sube a
   de la cola; si tenía varias, se reenvían una por una para que solo falle la culpable. Un 404
   con otro código, 401/403 y 5xx se reintentan.
 - `GET /api/v1/health` informa `pending_alert_upload` y `failed_alert_upload`.
-- Una alerta se cierra tras `ALERT_CLOSE_MINUTES` minutos normales consecutivos; un hueco o
-  un minuto sin lectura del indicador no cuenta. `closed_at` es el fin del ultimo minuto de
-  esa ventana y nunca es anterior a `opened_at` (con datos atrasados se iguala a la apertura).
+- Una alerta se cierra tras una ventana de minutos normales consecutivos; un hueco o un minuto
+  sin lectura del indicador no cuenta. La ventana es el `sustained_minutes` del umbral de esa
+  sala para la métrica de la regla (`laeq` en ruido, `ppd` en confort térmico) y, si la sala no
+  tiene ese umbral, `NOISE_LIMIT_MINUTES`. Si se define `ALERT_CLOSE_MINUTES`, ese valor manda
+  en todas las salas. La alerta de confort térmico se abre con un solo minuto sobre el límite.
+  `closed_at` es el fin del ultimo minuto de la ventana y nunca es anterior a `opened_at` (con
+  datos atrasados se iguala a la apertura).
 
 **Migración de SQLite.** `init_db` añade a la tabla `alert` las columnas `closure_uploaded`
 y `upload_error` con `ALTER TABLE ... ADD COLUMN` al arrancar. No hace falta borrar `edge.db`:
@@ -274,5 +278,5 @@ Todo por variables de entorno, con valores por defecto en `edge/config.py`. Las 
 | `MQTT_ENABLED` | `true` | ponlo en `false` si no hay broker |
 | `NOISE_LIMIT_DBA` | `65` | umbral local de aviso |
 | `NOISE_LIMIT_MINUTES` | `2` | minutos consecutivos sobre el umbral para abrir la alerta de ruido |
-| `ALERT_CLOSE_MINUTES` | el de `NOISE_LIMIT_MINUTES` | minutos normales consecutivos para cerrar una alerta de ruido o de confort térmico |
+| `ALERT_CLOSE_MINUTES` | sin definir | si se define, fija en todas las salas los minutos normales consecutivos para cerrar una alerta de ruido o de confort térmico; sin ella, el `sustained_minutes` del umbral de la sala o `NOISE_LIMIT_MINUTES` |
 | `CLO` · `MET` · `AIR_VEL` | `0.6` · `1.2` · `0.1` | asunciones del modelo de confort |

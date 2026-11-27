@@ -186,24 +186,28 @@ def _rule_sustained_noise(agg):
 
     Lo de "seguidos" no es prudencia tecnica: un portazo son 75 dB durante medio
     segundo y no es un problema de nadie. Lo que molesta es el ruido sostenido.
-    Se cierra con la misma exigencia: ALERT_CLOSE_MINUTES minutos normales
-    consecutivos.
+    Se cierra con la misma exigencia: tantos minutos normales consecutivos como
+    pide la apertura en esa sala (ver _close_window).
     """
     limite, minutos = _limit(agg.room_id, "laeq",
                              config.NOISE_LIMIT_DBA, config.NOISE_LIMIT_MINUTES)
     recent = _recent_consecutive(agg, minutos)
     over = (len(recent) >= minutos
             and all(m.laeq is not None and m.laeq > limite for m in recent))
-    closing = _close_window(agg, lambda m: m.laeq is not None and m.laeq <= limite)
+    closing = _close_window(agg, minutos,
+                            lambda m: m.laeq is not None and m.laeq <= limite)
     _toggle(agg, "sustained_noise", over,
             "Noise above {:.0f} dBA for {} min".format(limite, minutos),
             agg.laeq, closing)
 
 
 def _rule_discomfort(agg):
-    limite, _ = _limit(agg.room_id, "ppd", config.PPD_LIMIT_PCT, 1)
+    # La apertura es inmediata; minutos solo fija la ventana de cierre.
+    limite, minutos = _limit(agg.room_id, "ppd",
+                             config.PPD_LIMIT_PCT, config.NOISE_LIMIT_MINUTES)
     over = agg.ppd is not None and agg.ppd > limite
-    closing = _close_window(agg, lambda m: m.ppd is not None and m.ppd <= limite)
+    closing = _close_window(agg, minutos,
+                            lambda m: m.ppd is not None and m.ppd <= limite)
     _toggle(agg, "thermal_discomfort", over,
             "Thermal discomfort: PPD {:.0f}% ({})".format(
                 agg.ppd or 0, agg.thermal_verdict),
@@ -226,12 +230,15 @@ def _recent_consecutive(agg, n):
     return out
 
 
-def _close_window(agg, is_normal):
+def _close_window(agg, minutes, is_normal):
     """
     Fin del ultimo minuto de la ventana normal, o None si la ventana no esta
-    completa: ALERT_CLOSE_MINUTES minutos consecutivos, todos normales.
+    completa: `minutes` minutos consecutivos, todos normales. ALERT_CLOSE_MINUTES,
+    si esta definida, sustituye a `minutes`.
     """
-    n = max(1, config.ALERT_CLOSE_MINUTES)
+    if config.ALERT_CLOSE_MINUTES is not None:
+        minutes = config.ALERT_CLOSE_MINUTES
+    n = max(1, minutes)
     window = _recent_consecutive(agg, n)
     if len(window) < n or not all(is_normal(m) for m in window):
         return None
