@@ -152,7 +152,7 @@ La implementacion C++ para el montaje actual esta en `zenroom-embedded-app`.
 | `GET` | `/api/v1/rooms` | salas con su último minuto |
 | `GET` | `/api/v1/rooms/<id>/minutes` | la serie por minuto |
 | `GET` | `/api/v1/alerts` | alertas abiertas; `?status=closed` o `?status=all`, con su estado de subida |
-| `GET` | `/api/v1/health` | estado, cola pendiente y contadores |
+| `GET` | `/api/v1/health` | estado, cola pendiente, contadores y últimos eventos de procesamiento (`recent_events`) |
 
 ## Qué hay dentro
 
@@ -225,10 +225,36 @@ El Edge abre y cierra las alertas en local, sin internet, y las sube a
   de la cola; si tenía varias, se reenvían una por una para que solo falle la culpable. Un 404
   con otro código, 401/403 y 5xx se reintentan.
 - `GET /api/v1/health` informa `pending_alert_upload` y `failed_alert_upload`.
+- Una alerta se cierra tras una ventana de minutos normales consecutivos; un hueco o un minuto
+  sin lectura del indicador no cuenta. La ventana es el `sustained_minutes` del umbral de esa
+  sala para la métrica de la regla (`laeq` en ruido, `ppd` en confort térmico) y, si la sala no
+  tiene ese umbral, `NOISE_LIMIT_MINUTES`. Si se define `ALERT_CLOSE_MINUTES`, ese valor manda
+  en todas las salas. La alerta de confort térmico se abre con un solo minuto sobre el límite.
+  `closed_at` es el fin del ultimo minuto de la ventana y nunca es anterior a `opened_at` (con
+  datos atrasados se iguala a la apertura).
 
 **Migración de SQLite.** `init_db` añade a la tabla `alert` las columnas `closure_uploaded`
 y `upload_error` con `ALTER TABLE ... ADD COLUMN` al arrancar. No hace falta borrar `edge.db`:
 las alertas existentes se conservan y, como nunca se habían subido, entran en la cola.
+
+## Eventos de procesamiento
+
+Cada evento sale como una linea `key=value` en el logger `edge.processing`, y los ultimos 20
+se consultan en `recent_events` de `GET /api/v1/health` (se guardan en memoria):
+
+```
+event=minute.processed room_id=sala-03 ts=2026-11-27T14:10:00Z logged_at=2026-11-27T14:11:05Z
+event=batch.rejected room_id=sala-03 ts=2026-11-27T14:10:00Z cause="campos invalidos o ausentes ['seq']" logged_at=2026-11-27T14:10:21Z
+```
+
+| Evento | Cuando |
+|---|---|
+| `minute.processed` | se agrego el minuto de una sala |
+| `minute.failed` | fallo la agregacion; lleva `cause` |
+| `batch.rejected` | un lote o mensaje (HTTP o MQTT) no se pudo procesar; lleva `cause` |
+
+`ts` es el minuto de la medicion y `logged_at` la hora del registro. Si el mensaje no trae
+sala o fecha legibles, el campo vale `unknown`.
 
 ## Pruebas de la conexion
 
@@ -251,4 +277,6 @@ Todo por variables de entorno, con valores por defecto en `edge/config.py`. Las 
 | `HEARTBEAT_URL` | `http://127.0.0.1:8080/api/v1/edges/heartbeat` | a dónde manda el latido, cada `HEARTBEAT_S` segundos (60) |
 | `MQTT_ENABLED` | `true` | ponlo en `false` si no hay broker |
 | `NOISE_LIMIT_DBA` | `65` | umbral local de aviso |
+| `NOISE_LIMIT_MINUTES` | `2` | minutos consecutivos sobre el umbral para abrir la alerta de ruido |
+| `ALERT_CLOSE_MINUTES` | sin definir | si se define, fija en todas las salas los minutos normales consecutivos para cerrar una alerta de ruido o de confort térmico; sin ella, el `sustained_minutes` del umbral de la sala o `NOISE_LIMIT_MINUTES` |
 | `CLO` · `MET` · `AIR_VEL` | `0.6` · `1.2` · `0.1` | asunciones del modelo de confort |

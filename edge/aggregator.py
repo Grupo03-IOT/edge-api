@@ -16,6 +16,7 @@ import requests
 from peewee import fn
 
 import config
+import events
 import thresholds
 from acoustics import leq, merge_hists, percentile_level, leq_from_hist
 from comfort import pmv_ppd, verdict, ASSUMPTIONS
@@ -59,7 +60,7 @@ def aggregate_pending():
     for room_id, minute_key in keys:
         watermarks[room_id] = max(watermarks.get(room_id, ""), minute_key)
 
-    made = 0
+    processed = []
     for room_id, minute_key in sorted(keys):
         closed = (minute_key < watermarks.get(room_id, "")
                   or minute_key < now_key)
@@ -70,9 +71,19 @@ def aggregate_pending():
             & (MinuteAggregate.minute_key == minute_key))
         if exists and not exists.dirty:
             continue
-        if aggregate_minute(room_id, minute_key):
-            made += 1
-    return made
+        try:
+            result = aggregate_minute(room_id, minute_key)
+        except Exception as exc:
+            events.record("minute.failed", room_id, minute_key,
+                          cause="{}: {}".format(type(exc).__name__, exc))
+            raise
+        if result:
+            processed.append((room_id, minute_key))
+    # El exito se registra al final: si un minuto falla, la transaccion deshace
+    # tambien los anteriores y no deben figurar como procesados.
+    for room_id, minute_key in processed:
+        events.record("minute.processed", room_id, minute_key)
+    return len(processed)
 
 
 def aggregate_minute(room_id, minute_key):
@@ -175,32 +186,63 @@ def _rule_sustained_noise(agg):
 
     Lo de "seguidos" no es prudencia tecnica: un portazo son 75 dB durante medio
     segundo y no es un problema de nadie. Lo que molesta es el ruido sostenido.
+    Se cierra con la misma exigencia: tantos minutos normales consecutivos como
+    pide la apertura en esa sala (ver _close_window).
     """
     limite, minutos = _limit(agg.room_id, "laeq",
                              config.NOISE_LIMIT_DBA, config.NOISE_LIMIT_MINUTES)
-    recent = list(MinuteAggregate
-                  .select()
-            .where((MinuteAggregate.room_id == agg.room_id)
-                   & (MinuteAggregate.ts <= agg.ts))
-                  .order_by(MinuteAggregate.ts.desc())
-                  .limit(minutos))
-    consecutive = (len(recent) >= minutos and all(
-        (recent[i].ts - recent[i + 1].ts).total_seconds() == 60
-        for i in range(len(recent) - 1)))
-    over = (consecutive
+    recent = _recent_consecutive(agg, minutos)
+    over = (len(recent) >= minutos
             and all(m.laeq is not None and m.laeq > limite for m in recent))
+    closing = _close_window(agg, minutos,
+                            lambda m: m.laeq is not None and m.laeq <= limite)
     _toggle(agg, "sustained_noise", over,
             "Noise above {:.0f} dBA for {} min".format(limite, minutos),
-            agg.laeq)
+            agg.laeq, closing)
 
 
 def _rule_discomfort(agg):
-    limite, _ = _limit(agg.room_id, "ppd", config.PPD_LIMIT_PCT, 1)
+    # La apertura es inmediata; minutos solo fija la ventana de cierre.
+    limite, minutos = _limit(agg.room_id, "ppd",
+                             config.PPD_LIMIT_PCT, config.NOISE_LIMIT_MINUTES)
     over = agg.ppd is not None and agg.ppd > limite
+    closing = _close_window(agg, minutos,
+                            lambda m: m.ppd is not None and m.ppd <= limite)
     _toggle(agg, "thermal_discomfort", over,
             "Thermal discomfort: PPD {:.0f}% ({})".format(
                 agg.ppd or 0, agg.thermal_verdict),
-            agg.ppd)
+            agg.ppd, closing)
+
+
+def _recent_consecutive(agg, n):
+    """Hasta n minutos que terminan en agg, cortando en el primer hueco."""
+    rows = list(MinuteAggregate
+                .select()
+                .where((MinuteAggregate.room_id == agg.room_id)
+                       & (MinuteAggregate.ts <= agg.ts))
+                .order_by(MinuteAggregate.ts.desc())
+                .limit(n))
+    out = rows[:1]
+    for row in rows[1:]:
+        if (out[-1].ts - row.ts).total_seconds() != 60:
+            break
+        out.append(row)
+    return out
+
+
+def _close_window(agg, minutes, is_normal):
+    """
+    Fin del ultimo minuto de la ventana normal, o None si la ventana no esta
+    completa: `minutes` minutos consecutivos, todos normales. ALERT_CLOSE_MINUTES,
+    si esta definida, sustituye a `minutes`.
+    """
+    if config.ALERT_CLOSE_MINUTES is not None:
+        minutes = config.ALERT_CLOSE_MINUTES
+    n = max(1, minutes)
+    window = _recent_consecutive(agg, n)
+    if len(window) < n or not all(is_normal(m) for m in window):
+        return None
+    return agg.ts + datetime.timedelta(minutes=1)
 
 
 def _limit(room_id, metric, por_defecto, minutos_por_defecto):
@@ -217,16 +259,34 @@ def _limit(room_id, metric, por_defecto, minutos_por_defecto):
     return t.warn_value, max(1, t.sustained_minutes)
 
 
-def _toggle(agg, rule, condition, message, value):
-    """Abre la alerta si no estaba abierta; la cierra cuando deja de cumplirse."""
+_NOW = object()
+
+
+def _toggle(agg, rule, condition, message, value, close_at=_NOW):
+    """
+    Abre la alerta si no estaba abierta; la cierra cuando deja de cumplirse.
+
+    La condicion en falso no basta para cerrar: el llamador entrega close_at
+    (fin del ultimo minuto de la ventana normal) cuando la ventana esta completa.
+    close_at=None significa ventana incompleta: la alerta sigue abierta. Sin
+    close_at (llamada directa) se cierra de inmediato con la hora actual.
+    """
     open_alert = Alert.get_or_none(
         (Alert.room_id == agg.room_id) & (Alert.rule == rule)
         & (Alert.closed_at.is_null(True)))
     if condition and not open_alert:
         Alert.create(room_id=agg.room_id, rule=rule, message=message, value=value)
     elif not condition and open_alert:
-        open_alert.closed_at = datetime.datetime.utcnow()
-        open_alert.save()
+        if close_at is _NOW:
+            close_at = datetime.datetime.utcnow()
+        if close_at is not None:
+            # opened_at es hora del Edge y close_at hora de la medicion. Con
+            # atraso o reloj desviado el cierre quedaria antes de la apertura,
+            # y el Cloud rechaza esa alerta para siempre.
+            if open_alert.opened_at:
+                close_at = max(close_at, open_alert.opened_at)
+            open_alert.closed_at = close_at
+            open_alert.save()
 
 
 # ---------------------------------------------------------------- cloud ----
