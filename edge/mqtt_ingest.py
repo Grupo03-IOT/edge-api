@@ -21,6 +21,7 @@ import paho.mqtt.client as mqtt
 from peewee import DatabaseError
 
 import config
+import events
 from ingest import InvalidBatch, set_link_status, store_batch, store_forecast
 from models import db
 
@@ -65,8 +66,19 @@ def _on_message(client, userdata, message):
         # registro y no se propaga, o el cliente reintentaria en bucle.
         log("[mqtt] lote invalido en {}: {} {}".format(
             message.topic, exc.message, exc.fields))
+        events.record_rejected(_body_or_none(message),
+                               "{} {}".format(exc.message, exc.fields))
     except (DatabaseError, ValueError, TypeError) as exc:
         log("[mqtt] error procesando {}: {}".format(message.topic, exc))
+        events.record_rejected(_body_or_none(message),
+                               "{}: {}".format(type(exc).__name__, exc))
+
+
+def _body_or_none(message):
+    try:
+        return json.loads(message.payload.decode("utf-8"))
+    except ValueError:
+        return None
 
 
 def _handle_reading(message, log):

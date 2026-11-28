@@ -13,10 +13,12 @@ Variables de entorno utiles:
 """
 import datetime
 import json
+import logging
 
 from flask import Flask, jsonify, request
 
 import config
+import events
 import heartbeat
 import device_commands
 import mqtt_ingest
@@ -60,6 +62,7 @@ def ingest():
     try:
         seq, suspect, duplicate = store_batch(body)
     except InvalidBatch as exc:
+        events.record_rejected(body, "{} {}".format(exc.message, exc.fields))
         return jsonify(error=exc.message, fields=exc.fields), 400
     return jsonify(status="duplicate" if duplicate else "ok", seq=seq,
                    clock_suspect=suspect), 200 if duplicate else 201
@@ -68,9 +71,11 @@ def ingest():
 @app.post("/api/v1/telemetry")
 def ingest_telemetry():
     """DHT22, PIR, distancia, ADC y botones desde el puente USB."""
+    body = request.get_json(silent=True)
     try:
-        seq, suspect, duplicate = store_telemetry(request.get_json(silent=True))
+        seq, suspect, duplicate = store_telemetry(body)
     except InvalidBatch as exc:
+        events.record_rejected(body, "{} {}".format(exc.message, exc.fields))
         return jsonify(error=exc.message, fields=exc.fields), 400
     return jsonify(status="duplicate" if duplicate else "ok", seq=seq,
                    clock_suspect=suspect), 200 if duplicate else 201
@@ -155,10 +160,12 @@ def health():
         pending_alert_upload=pending_alerts_query().count(),
         failed_alert_upload=Alert.select().where(
             Alert.upload_error.is_null(False)).count(),
+        recent_events=events.recent(),
     )
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     init_db(config.DB_PATH)
     print("Edge API  ->  http://{}:{}".format(config.HOST, config.PORT))
     print("Cloud     ->  {}".format(config.CLOUD_URL))

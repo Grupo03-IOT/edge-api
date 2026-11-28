@@ -42,6 +42,13 @@ NOISE_LIMIT_DBA = float(os.getenv("NOISE_LIMIT_DBA", "65"))
 NOISE_LIMIT_MINUTES = int(os.getenv("NOISE_LIMIT_MINUTES", "2"))
 PPD_LIMIT_PCT = float(os.getenv("PPD_LIMIT_PCT", "20"))
 
+# Minutos normales CONSECUTIVOS que hacen falta para cerrar una alerta abierta.
+# Sin la variable (None), cada sala cierra con la ventana de su umbral
+# (sustained_minutes) o, si no tiene umbral propio, con NOISE_LIMIT_MINUTES.
+# Con la variable, ese valor manda en todas las salas y reglas.
+_close_minutes = os.getenv("ALERT_CLOSE_MINUTES", "").strip()
+ALERT_CLOSE_MINUTES = int(_close_minutes) if _close_minutes else None
+
 # Limite de temperatura que se le ordena al dispositivo cuando su sala no tiene
 # umbral de temperatura propio, y rango que el firmware acepta (fuera de el
 # ignora la orden). El valor por defecto es el de fabrica del firmware.
